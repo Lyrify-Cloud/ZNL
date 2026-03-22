@@ -1,4 +1,4 @@
-﻿# lmm-node
+﻿# ZeroMQ Node Link
 
 ZeroMQ 主从通信库（当前版本：`PUB/SUB + ROUTER/DEALER`）。
 
