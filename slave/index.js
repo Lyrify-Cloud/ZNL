@@ -1,6 +1,7 @@
 import { ZmqClusterNode } from "./lib/ZmqClusterNode.js";
 
 const id = process.argv[2] ?? "slave-001";
+const AUTH_KEY = "lmm-demo-fixed-key-";
 
 const slave = new ZmqClusterNode({
   role: "slave",
@@ -11,6 +12,7 @@ const slave = new ZmqClusterNode({
   },
   subscribeTopics: ["hello"],
   maxPending: 2000,
+  authKey: AUTH_KEY,
 });
 
 const toText = (payload) =>

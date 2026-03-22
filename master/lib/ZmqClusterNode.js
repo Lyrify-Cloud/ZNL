@@ -15,6 +15,7 @@ const EMPTY_BUFFER = Buffer.alloc(0);
 const CONTROL_PREFIX = "__zmqnode_v1__";
 const CONTROL_REQ = "req";
 const CONTROL_RES = "res";
+const CONTROL_AUTH = "__zmqnode_v1_auth__";
 
 export class ZmqClusterNode extends EventEmitter {
   constructor({
@@ -23,6 +24,7 @@ export class ZmqClusterNode extends EventEmitter {
     endpoints = {},
     subscribeTopics = [DEFAULT_TOPIC],
     maxPending = 0,
+    authKey = "",
   } = {}) {
     super();
 
@@ -49,6 +51,8 @@ export class ZmqClusterNode extends EventEmitter {
     // key => { resolve, reject, timer }
     this.pending = new Map();
     this.maxPending = this.#normalizeMaxPending(maxPending);
+    this.authKey = this.#normalizeAuthKey(authKey);
+    this.requireAuth = this.role === "master" && this.authKey.length > 0;
 
     // 各 socket 的发送队列（解决 ZeroMQ 同 socket 并发 send 的 EBUSY）
     this.sendQueues = new Map();
@@ -144,12 +148,13 @@ export class ZmqClusterNode extends EventEmitter {
     const requestId = randomUUID();
     const key = this.#pendingKey(requestId);
     const pending = this.#createPending(key, timeoutMs, requestId);
-    const frames = this.#normalizeFrames(payload);
+    const payloadFrames = this.#normalizeFrames(payload);
+    const requestFrames = this.#buildRequestFrames(requestId, payloadFrames);
 
     // 注意：超时从“真正开始发送”算起，避免大并发排队时被提前超时。
     this.#sendQueued("dealer", async () => {
       pending.startTimer();
-      await socket.send([CONTROL_PREFIX, CONTROL_REQ, requestId, ...frames]);
+      await socket.send(requestFrames);
     }).catch((error) => {
       this.#rejectPending(key, error);
     });
@@ -172,17 +177,15 @@ export class ZmqClusterNode extends EventEmitter {
       identityText
     );
     const idFrame = this.#identityToBuffer(identity);
-    const frames = this.#normalizeFrames(payload);
+    const payloadFrames = this.#normalizeFrames(payload);
+    const requestFrames = this.#buildRequestFrames(requestId, payloadFrames);
 
     // 注意：超时从“真正开始发送”算起，避免大并发排队时被提前超时。
     this.#sendQueued("router", async () => {
       pending.startTimer();
       await socket.send([
         idFrame,
-        CONTROL_PREFIX,
-        CONTROL_REQ,
-        requestId,
-        ...frames,
+        ...requestFrames,
       ]);
     }).catch((error) => {
       this.#rejectPending(key, error);
@@ -275,11 +278,20 @@ export class ZmqClusterNode extends EventEmitter {
         identityText,
         kind: parsed.kind,
         requestId: parsed.requestId,
+        authKey: parsed.authKey,
         payloadFrames: parsed.payloadFrames,
         payload,
       });
 
       if (parsed.kind === "request") {
+        if (this.requireAuth && parsed.authKey !== this.authKey) {
+          this.emit("auth_failed", {
+            ...event,
+            expectedAuthKey: this.authKey,
+          });
+          return;
+        }
+
         this.emit("request", event);
 
         if (this.routerAutoHandler) {
@@ -333,6 +345,7 @@ export class ZmqClusterNode extends EventEmitter {
       const event = this.#emitMessage("dealer", frames, {
         kind: parsed.kind,
         requestId: parsed.requestId,
+        authKey: parsed.authKey,
         payloadFrames: parsed.payloadFrames,
         payload,
       });
@@ -393,10 +406,23 @@ export class ZmqClusterNode extends EventEmitter {
       const requestId = frames[2]?.toString();
 
       if ((action === CONTROL_REQ || action === CONTROL_RES) && requestId) {
+        let payloadStart = 3;
+        let authKey = null;
+
+        if (
+          action === CONTROL_REQ &&
+          frames.length >= 5 &&
+          frames[3]?.toString() === CONTROL_AUTH
+        ) {
+          authKey = frames[4]?.toString() ?? "";
+          payloadStart = 5;
+        }
+
         return {
           kind: action === CONTROL_REQ ? "request" : "response",
           requestId,
-          payloadFrames: frames.slice(3),
+          authKey,
+          payloadFrames: frames.slice(payloadStart),
         };
       }
     }
@@ -404,6 +430,7 @@ export class ZmqClusterNode extends EventEmitter {
     return {
       kind: "message",
       requestId: null,
+      authKey: null,
       payloadFrames: frames,
     };
   }
@@ -430,6 +457,14 @@ export class ZmqClusterNode extends EventEmitter {
     throw new TypeError(
       "payload 仅支持 string / Buffer / Uint8Array（或这些类型组成的数组）。"
     );
+  }
+
+  #buildRequestFrames(requestId, payloadFrames) {
+    const frames = [CONTROL_PREFIX, CONTROL_REQ, requestId];
+    if (this.authKey) {
+      frames.push(CONTROL_AUTH, this.authKey);
+    }
+    return [...frames, ...payloadFrames];
   }
 
   #pendingKey(requestId, identityText = "") {
@@ -539,6 +574,11 @@ export class ZmqClusterNode extends EventEmitter {
     const n = Number(maxPending);
     if (!Number.isFinite(n) || n <= 0) return 0;
     return Math.floor(n);
+  }
+
+  #normalizeAuthKey(authKey) {
+    if (authKey == null) return "";
+    return String(authKey);
   }
 
   #identityToString(identity) {

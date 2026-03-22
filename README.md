@@ -58,6 +58,7 @@ new ZmqClusterNode({
   },
   subscribeTopics: ["hello"],
   maxPending: 0,
+  authKey: "",
 });
 ```
 
@@ -66,6 +67,7 @@ new ZmqClusterNode({
 - `endpoints`：地址配置，可覆盖默认值。
 - `subscribeTopics`：`slave` 初始订阅主题列表。
 - `maxPending`：最多允许多少个等待中的请求（`0` 表示不限，默认 `0`）。
+- `authKey`：认证 key。`master` 设置后会校验 `slave` 的请求 key，不匹配则不回复。
 
 ## Payload 支持类型
 
@@ -134,7 +136,8 @@ const res = await master.ROUTER("slave-001", "ping", { timeoutMs: 4000 });
 console.log(res.toString());
 ```
 
-> 自动 `requestId` 匹配、回包和超时处理依然在库内完成，业务层不需要关心消息格式。
+> 自动 `requestId` 匹配、回包和超时处理依然在库内完成，业务层不需要关心消息格式。  
+> 认证范围：只针对 `DEALER -> ROUTER` 请求（不包含 `PUB/SUB`）。
 
 ## 事件（on）
 
@@ -145,6 +148,7 @@ console.log(res.toString());
 - `dealer`：slave 收到 DEALER 消息。
 - `request`：收到请求帧（自动识别）。
 - `response`：收到响应帧（自动识别）。
+- `auth_failed`：仅 master。收到未通过认证的请求（不会回复）。
 - `message`：所有消息的统一事件。
 - `error`：内部异常。
 
@@ -155,6 +159,8 @@ console.log(res.toString());
 ```js
 import { ZmqClusterNode } from "./lib/ZmqClusterNode.js";
 
+const AUTH_KEY = "lmm-demo-fixed-key";
+
 const master = new ZmqClusterNode({
   role: "master",
   id: "master-demo",
@@ -163,6 +169,7 @@ const master = new ZmqClusterNode({
     router: "tcp://127.0.0.1:6003",
   },
   maxPending: 5000,
+  authKey: AUTH_KEY,
 });
 
 const toText = (payload) =>
@@ -177,6 +184,12 @@ master.ROUTER(async ({ identityText, payload }) => {
 
 master.on("error", (err) => {
   console.error("[MASTER ERROR]", err.message);
+});
+
+master.on("auth_failed", ({ identityText, authKey }) => {
+  console.error(
+    `[MASTER][AUTH FAILED] from=${identityText} provided=${authKey ?? "<none>"}`
+  );
 });
 
 await master.start();
@@ -203,6 +216,7 @@ process.on("SIGINT", async () => {
 import { ZmqClusterNode } from "./lib/ZmqClusterNode.js";
 
 const id = "slave-001";
+const AUTH_KEY = "lmm-demo-fixed-key";
 const slave = new ZmqClusterNode({
   role: "slave",
   id,
@@ -212,6 +226,7 @@ const slave = new ZmqClusterNode({
   },
   subscribeTopics: ["hello"],
   maxPending: 2000,
+  authKey: AUTH_KEY,
 });
 
 const toText = (payload) =>

@@ -1,5 +1,7 @@
 import { ZmqClusterNode } from "./lib/ZmqClusterNode.js";
 
+const AUTH_KEY = "lmm-demo-fixed-key";
+
 const master = new ZmqClusterNode({
   role: "master",
   id: "master-demo",
@@ -8,6 +10,7 @@ const master = new ZmqClusterNode({
     router: "tcp://127.0.0.1:6003",
   },
   maxPending: 5000,
+  authKey: AUTH_KEY,
 });
 
 const toText = (payload) =>
@@ -22,6 +25,12 @@ master.ROUTER(async ({ identityText, payload }) => {
 
 master.on("error", (error) => {
   console.error("[MASTER ERROR]", error?.message ?? error);
+});
+
+master.on("auth_failed", ({ identityText, authKey }) => {
+  console.error(
+    `[MASTER][AUTH FAILED] from=${identityText} provided=${authKey ?? "<none>"}`
+  );
 });
 
 await master.start();
