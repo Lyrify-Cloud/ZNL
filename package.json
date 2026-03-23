@@ -1,0 +1,43 @@
+{
+  "name": "znl",
+  "version": "1.0.0",
+  "description": "ZNL - ZeroMQ ROUTER/DEALER helper for Node.js.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "example:master": "node test/master/index.js",
+    "example:slave": "node test/slave/index.js",
+    "test": "node test/run.js",
+    "test:echo": "node test/master/test-echo-server.js",
+    "test:100": "node test/slave/test-100-concurrent.js",
+    "check": "node --check index.js && node --check src/constants.js && node --check src/protocol.js && node --check src/PendingManager.js && node --check src/SendQueue.js && node --check src/ZNL.js && node --check test/master/index.js && node --check test/slave/index.js && node --check test/master/test-echo-server.js && node --check test/slave/test-100-concurrent.js && node --check test/run.js"
+  },
+  "keywords": [
+    "zeromq",
+    "router",
+    "dealer",
+    "nodejs",
+    "rpc"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "zeromq": "^6.5.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "zeromq"
+    ]
+  }
+}
