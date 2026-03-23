@@ -15,7 +15,7 @@
 ## 安装
 
 ```bash
-pnpm add znl
+pnpm add @lyrify/znl
 ```
 
 本地开发克隆仓库后：
@@ -29,7 +29,7 @@ pnpm install
 ### Master 节点
 
 ```js
-import { ZNL } from "znl";
+import { ZNL } from "@lyrify/znl";
 
 const master = new ZNL({
   role: "master",
@@ -58,7 +58,7 @@ master.publish("system", JSON.stringify({ status: "ok", time: Date.now() }));
 ### Slave 节点
 
 ```js
-import { ZNL } from "znl";
+import { ZNL } from "@lyrify/znl";
 
 const slave = new ZNL({
   role: "slave",
