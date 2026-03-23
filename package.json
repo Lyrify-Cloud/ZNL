@@ -1,7 +1,7 @@
 {
   "name": "znl",
-  "version": "1.0.0",
-  "description": "ZNL - ZeroMQ ROUTER/DEALER helper for Node.js.",
+  "version": "0.3.1",
+  "description": "ZNL - ZeroMQ Node Link",
   "type": "module",
   "main": "./index.js",
   "exports": {
