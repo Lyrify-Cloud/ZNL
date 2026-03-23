@@ -2,14 +2,14 @@ name: Publish npm on GitHub Release
 
 on:
   release:
-    types: [published]   # 只有点击 "Publish release" 才触发
+    types: [published]
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write   # npm provenance
+      id-token: write
 
     steps:
       - name: Checkout
@@ -24,8 +24,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          registry-url: "https://registry.npmjs.org"
-          cache: "pnpm"
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -38,7 +38,7 @@ jobs:
 
       - name: Verify release tag matches package version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"   # v1.2.3 -> 1.2.3
+          TAG="${GITHUB_REF_NAME#v}"
           PKG_VERSION=$(node -p "require('./package.json').version")
           echo "release tag=$TAG, package.json=$PKG_VERSION"
           [ "$TAG" = "$PKG_VERSION" ] || (echo "Tag 与 package.json 版本不一致" && exit 1)
@@ -52,89 +52,16 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve npm dist-tag from release type
+      - name: Set npm dist-tag
         id: disttag
         run: |
-          # release.prerelease = true  -> next
-          # release.prerelease = false -> latest
           if [ "${{ github.event.release.prerelease }}" = "true" ]; then
             echo "tag=next" >> "$GITHUB_OUTPUT"
           else
             echo "tag=latest" >> "$GITHUB_OUTPUT"
           fi
-          echo "npm dist-tag => $(cat $GITHUB_OUTPUT | sed -n 's/^tag=//p')"
 
       - name: Publish to npm
-        run: npm publish --provenance --access public --tag "${{ steps.disttag.outputs.tag }}"
+        run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          name: Publish npm on GitHub Release
-          
-          on:
-            release:
-              types: [published]   # 只有点击 "Publish release" 才触发
-          
-          jobs:
-            publish:
-              runs-on: ubuntu-latest
-              permissions:
-                contents: read
-                id-token: write   # npm provenance
-          
-              steps:
-                - name: Checkout
-                  uses: actions/checkout@v4
-          
-                - name: Setup pnpm
-                  uses: pnpm/action-setup@v4
-                  with:
-                    version: 10
-          
-                - name: Setup Node.js
-                  uses: actions/setup-node@v4
-                  with:
-                    node-version: 20
-                    registry-url: "https://registry.npmjs.org"
-                    cache: "pnpm"
-          
-                - name: Install
-                  run: pnpm install --frozen-lockfile
-          
-                - name: Check
-                  run: pnpm run check
-          
-                - name: Test
-                  run: pnpm test
-          
-                - name: Verify release tag matches package version
-                  run: |
-                    TAG="${GITHUB_REF_NAME#v}"   # v1.2.3 -> 1.2.3
-                    PKG_VERSION=$(node -p "require('./package.json').version")
-                    echo "release tag=$TAG, package.json=$PKG_VERSION"
-                    [ "$TAG" = "$PKG_VERSION" ] || (echo "Tag 与 package.json 版本不一致" && exit 1)
-          
-                - name: Prevent duplicate publish
-                  run: |
-                    NAME=$(node -p "require('./package.json').name")
-                    VER=$(node -p "require('./package.json').version")
-                    if npm view "$NAME@$VER" version >/dev/null 2>&1; then
-                      echo "$NAME@$VER 已存在，停止发布"
-                      exit 1
-                    fi
-          
-                - name: Resolve npm dist-tag from release type
-                  id: disttag
-                  run: |
-                    # release.prerelease = true  -> next
-                    # release.prerelease = false -> latest
-                    if [ "${{ github.event.release.prerelease }}" = "true" ]; then
-                      echo "tag=next" >> "$GITHUB_OUTPUT"
-                    else
-                      echo "tag=latest" >> "$GITHUB_OUTPUT"
-                    fi
-                    echo "npm dist-tag => $(cat $GITHUB_OUTPUT | sed -n 's/^tag=//p')"
-          
-                - name: Publish to npm
-                  run: npm publish --provenance --access public --tag "${{ steps.disttag.outputs.tag }}"
-                  env:
-                    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
