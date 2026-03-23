@@ -5,7 +5,7 @@
 ## 特性
 
 - 基于 `ROUTER/DEALER` 同时实现 RPC 请求-响应与 PUB/SUB 广播，一套连接两种模式
-- 内置请求 ID 匹配、超时控制、最大并发限制
+- 自动处理并发消息匹配、自动处理心跳包、超时控制、最大并发限制
 - 支持 Master → Slave 主动发起请求（双向 RPC）
 - 基于 ROUTER 实现 PUB/SUB 广播，无需额外 socket 或端口
 - Slave 自动注册/注销，Master 实时感知在线节点
