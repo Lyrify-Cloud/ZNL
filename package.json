@@ -1,6 +1,6 @@
 {
   "name": "@lyrify/znl",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "ZNL - ZeroMQ Node Link",
   "type": "module",
   "main": "./index.js",
@@ -29,6 +29,14 @@
     "rpc"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Lyrify-Cloud/ZNL.git"
+  },
+  "homepage": "https://github.com/Lyrify-Cloud/ZNL#readme",
+  "bugs": {
+    "url": "https://github.com/Lyrify-Cloud/ZNL/issues"
+  },
   "engines": {
     "node": ">=18"
   },
