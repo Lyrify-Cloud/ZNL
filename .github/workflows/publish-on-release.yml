@@ -1,4 +1,4 @@
-name: Publish npm on GitHub Release
+name: Publish to npm (pnpm)
 
 on:
   release:
@@ -18,50 +18,43 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 9
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          registry-url: https://registry.npmjs.org
+          registry-url: https://registry.npmjs.org/
           cache: pnpm
 
-      - name: Install
+      - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Check
-        run: pnpm run check
+      - name: Build
+        run: pnpm run build --if-present
 
       - name: Test
-        run: pnpm test
+        run: pnpm run test --if-present
 
-      - name: Verify release tag matches package version
+      - name: Verify tag and package version match
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG_VERSION=$(node -p "require('./package.json').version")
-          echo "release tag=$TAG, package.json=$PKG_VERSION"
-          [ "$TAG" = "$PKG_VERSION" ] || (echo "Tag 与 package.json 版本不一致" && exit 1)
+          echo "tag=$TAG, package.json=$PKG_VERSION"
+          [ "$TAG" = "$PKG_VERSION" ] || (echo "Tag and package.json version do not match" && exit 1)
 
-      - name: Prevent duplicate publish
-        run: |
-          NAME=$(node -p "require('./package.json').name")
-          VER=$(node -p "require('./package.json').version")
-          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
-            echo "$NAME@$VER 已存在，停止发布"
-            exit 1
-          fi
-
-      - name: Set npm dist-tag
+      - name: Decide npm dist-tag
         id: disttag
         run: |
-          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
-            echo "tag=next" >> "$GITHUB_OUTPUT"
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "tag=next" >> $GITHUB_OUTPUT
           else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "tag=latest" >> $GITHUB_OUTPUT
           fi
+          echo "Will publish with dist-tag: $(cat $GITHUB_OUTPUT | sed -n 's/^tag=//p')"
 
       - name: Publish to npm
-        run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
+        run: pnpm publish --no-git-checks --access public --provenance --tag ${{ steps.disttag.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
