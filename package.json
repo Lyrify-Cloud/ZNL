@@ -1,6 +1,6 @@
 {
   "name": "znl",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "ZNL - ZeroMQ Node Link",
   "type": "module",
   "main": "./index.js",

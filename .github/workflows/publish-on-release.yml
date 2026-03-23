@@ -36,7 +36,7 @@ jobs:
         run: pnpm run check --if-present
 
       - name: Rebuild native deps
-        run: pnpm rebuild zeromq --if-present
+        run: pnpm rebuild zeromq
 
       - name: Test
         run: pnpm run test --if-present
