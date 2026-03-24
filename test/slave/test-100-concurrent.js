@@ -2,10 +2,12 @@
  * 并发压测客户端
  *
  * 用法：
- *   node slave/test-100-concurrent.js [总请求数] [超时毫秒] [slave-id]
+ *   node slave/test-100-concurrent.js [总请求数] [超时毫秒] [slave-id] [authKey] [encrypted]
  *
  * 示例：
  *   node slave/test-100-concurrent.js 100 10000 slave-001
+ *   node slave/test-100-concurrent.js 100 10000 slave-001 my-secret-key true
+ *   node slave/test-100-concurrent.js 100 10000 slave-001 "" false
  *
  * 测试逻辑：
  *   1. 启动一个 Slave 节点并连接到 Master（需先运行 test-echo-server）
@@ -28,6 +30,20 @@ const timeoutMs = Number(process.argv[3] ?? 10000);
 /** Slave 节点 ID，默认使用时间戳防止与其他实例冲突 */
 const id = process.argv[4] ?? `slave-test-${Math.floor(Date.now() / 1000)}`;
 
+/**
+ * 可选共享认证 Key：
+ * - encrypted=false 时可不传
+ * - encrypted=true 时必须提供（用于签名与加密）
+ */
+const authKey = process.argv[5] ?? "";
+
+/**
+ * 是否启用加密：
+ * - false : 明文模式（默认，不签名/不加密）
+ * - true  : 签名 + 防重放 + payload 加密
+ */
+const encrypted = /^(true|1|yes)$/i.test(process.argv[6] ?? "");
+
 // ─── 节点初始化 ───────────────────────────────────────────────────────────────
 
 const slave = new ZNL({
@@ -36,6 +52,8 @@ const slave = new ZNL({
   endpoints: {
     router: "tcp://127.0.0.1:6003",
   },
+  authKey,
+  encrypted,
 });
 
 /** 将 Buffer 或任意值转为字符串 */
@@ -54,7 +72,7 @@ slave.on("error", (error) => {
 
 await slave.start();
 console.log(
-  `[压测客户端] 已启动  total=${total}  timeoutMs=${timeoutMs}  id=${id}`,
+  `[压测客户端] 已启动  total=${total}  timeoutMs=${timeoutMs}  id=${id}  encrypted=${encrypted}  authKey=${authKey ? "<provided>" : "<empty>"}`,
 );
 
 // 等待 DEALER 与 ROUTER 完成握手，避免前几条消息丢失

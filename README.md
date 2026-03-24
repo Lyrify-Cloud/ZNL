@@ -9,7 +9,11 @@
 - 支持 Master → Slave 主动发起请求（双向 RPC）
 - 基于 ROUTER 实现 PUB/SUB 广播，无需额外 socket 或端口
 - Slave 自动注册/注销，Master 实时感知在线节点
-- 可选的认证 Key 校验（注册与 RPC 请求均校验）
+- 支持可选加密认证（签名 + 防重放 + AES-256-GCM 透明加密）
+- 加密开关 `encrypted`：
+  - `false`：明文模式（不签名/不加密）
+  - `true`：签名 + 防重放 + payload 透明加密（AES-256-GCM）
+- `authKey` 仅在 `encrypted=true` 时必填
 - Payload 支持 `string`、`Buffer`、`Uint8Array` 及其数组（多帧）
 
 ## 安装
@@ -36,6 +40,7 @@ const master = new ZNL({
   id: "master-1",
   endpoints: { router: "tcp://127.0.0.1:6003" },
   authKey: "your-shared-key",
+  encrypted: true, // 推荐：透明加密 + 防重放
 });
 
 // RPC：自动回复 slave 的请求
@@ -65,6 +70,7 @@ const slave = new ZNL({
   id: "slave-001",
   endpoints: { router: "tcp://127.0.0.1:6003" },
   authKey: "your-shared-key",
+  encrypted: true, // 需与 master 一致
 });
 
 // PUB/SUB：精确订阅（可在 start 前调用）
@@ -95,6 +101,9 @@ new ZNL({
   },
   maxPending: 0,
   authKey: "",
+  encrypted: false,
+  maxTimeSkewMs: 30000,
+  replayWindowMs: 120000,
 });
 ```
 
@@ -104,7 +113,10 @@ new ZNL({
 | `id` | ✓ | 节点唯一标识；slave 端同时作为 ZMQ `routingId` |
 | `endpoints.router` | | ROUTER 端点，默认 `tcp://127.0.0.1:6003` |
 | `maxPending` | | 最大并发 RPC 请求数，`0` 表示不限制 |
-| `authKey` | | 可选共享认证 Key；master 开启后校验注册帧与 RPC 请求 |
+| `authKey` | | 共享认证 Key；仅在 `encrypted=true` 时必填（用于签名/加密） |
+| `encrypted` | | 是否启用加密：`false`（默认，明文） / `true`（签名+防重放+透明加密） |
+| `maxTimeSkewMs` | | 时间戳最大允许偏移（毫秒），默认 `30000`，用于防重放校验 |
+| `replayWindowMs` | | nonce 重放缓存窗口（毫秒），默认 `120000` |
 
 ## API
 
@@ -199,7 +211,7 @@ console.log(master.slaves); // ["slave-001", "slave-002"]
 | `publish` | Slave | 收到 master 广播，携带 `{ topic, payload }` |
 | `slave_connected` | Master | slave 注册成功上线，携带 `slaveId` |
 | `slave_disconnected` | Master | slave 注销或发送失败下线，携带 `slaveId` |
-| `auth_failed` | Master | 认证失败（注册或 RPC），请求已被丢弃 |
+| `auth_failed` | Master / Slave | 认证失败（签名校验失败、重放检测失败、解密失败等），请求已被丢弃 |
 | `error` | 两者 | 内部错误 |
 
 ## 本地示例
@@ -224,11 +236,21 @@ pnpm test
 ## 并发压测
 
 ```bash
-# 终端 1：启动 Echo 服务端
+# 终端 1：启动 Echo 服务端（plain）
 pnpm test:echo
 
-# 终端 2：发起并发压测
+# 终端 2：发起并发压测（plain）
 pnpm test:100 -- 100 10000 slave-001
+```
+
+启用安全模式示例：
+
+```bash
+# 终端 1：加密模式启动 Echo 服务端
+ZNL_AUTH_KEY=my-secret ZNL_ENCRYPTED=true pnpm test:echo
+
+# 终端 2：加密模式压测
+pnpm test:100 -- 100 10000 slave-001 my-secret true
 ```
 
 参数说明：

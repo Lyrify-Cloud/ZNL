@@ -6,17 +6,26 @@
  *
  * 启动方式：
  *   npm run test:echo
+ *
+ * 可选环境变量：
+ *   ZNL_AUTH_KEY   共享密钥（encrypted=true 时必填）
+ *   ZNL_ENCRYPTED  是否启用加密（true/false）
  */
 
 import { ZNL } from "../../index.js";
 
-// 不启用认证，方便压测脚本直接连接
+// 可选安全配置：通过环境变量控制，默认保持“开箱即用”
+const AUTH_KEY = process.env.ZNL_AUTH_KEY ?? "";
+const ENCRYPTED = /^(true|1|yes)$/i.test(process.env.ZNL_ENCRYPTED ?? "");
+
 const master = new ZNL({
   role: "master",
   id: "master-test",
   endpoints: {
     router: "tcp://127.0.0.1:6003",
   },
+  authKey: AUTH_KEY,
+  encrypted: ENCRYPTED,
 });
 
 /** 将 Buffer 或任意值转为可读字符串（仅用于日志） */
@@ -37,6 +46,9 @@ master.on("error", (error) => {
 
 await master.start();
 console.log("[MASTER TEST] echo 服务端已启动，监听 tcp://127.0.0.1:6003");
+console.log(
+  `[MASTER TEST] encrypted=${ENCRYPTED} authKey=${AUTH_KEY ? "<set>" : "<empty>"}`,
+);
 console.log("[MASTER TEST] 等待并发测试客户端连接...");
 
 // 优雅退出：收到信号时关闭节点

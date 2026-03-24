@@ -131,24 +131,53 @@ export function buildRequestFrames(requestId, payloadFrames, authKey = "") {
 
 /**
  * 构建响应控制帧数组
- * 帧结构：[PREFIX, "res", requestId, ...payloadFrames]
+ * 帧结构：[PREFIX, "res", requestId, (AUTH_MARKER, authProof)?, ...payloadFrames]
+ *
+ * 说明：
+ * - `authProof` 是可选的认证证明（例如签名令牌），与 `authKey` 概念不同。
+ * - 不传时与历史协议完全兼容。
+ *
  * @param {string} requestId
  * @param {Array<string|Buffer>} payloadFrames
+ * @param {string} [authProof] - 可选认证证明
  * @returns {Array}
  */
-export function buildResponseFrames(requestId, payloadFrames) {
-  return [CONTROL_PREFIX, CONTROL_RES, String(requestId), ...payloadFrames];
+export function buildResponseFrames(requestId, payloadFrames, authProof = "") {
+  const header = [CONTROL_PREFIX, CONTROL_RES, String(requestId)];
+  if (authProof) header.push(CONTROL_AUTH, authProof);
+  return [...header, ...payloadFrames];
 }
 
 /**
  * 构建广播控制帧数组（master → slave）
- * 帧结构：[PREFIX, "pub", topic, ...payloadFrames]
+ * 帧结构：[PREFIX, "pub", topic, (AUTH_MARKER, authProof)?, ...payloadFrames]
+ *
+ * 说明：
+ * - `authProof` 是可选的认证证明（例如签名令牌）。
+ * - 不传时与历史协议完全兼容。
+ *
  * @param {string} topic - 消息主题
  * @param {Array<string|Buffer>} payloadFrames - 已标准化的 payload 帧
+ * @param {string} [authProof] - 可选认证证明
  * @returns {Array}
  */
-export function buildPublishFrames(topic, payloadFrames) {
-  return [CONTROL_PREFIX, CONTROL_PUB, String(topic), ...payloadFrames];
+export function buildPublishFrames(topic, payloadFrames, authProof = "") {
+  const header = [CONTROL_PREFIX, CONTROL_PUB, String(topic)];
+  if (authProof) header.push(CONTROL_AUTH, authProof);
+  return [...header, ...payloadFrames];
+}
+
+/**
+ * 构建心跳控制帧数组（slave → master）
+ * 帧结构：[PREFIX, "heartbeat", (AUTH_MARKER, authProof)?]
+ *
+ * @param {string} [authProof] - 可选认证证明
+ * @returns {Array}
+ */
+export function buildHeartbeatFrames(authProof = "") {
+  const frames = [CONTROL_PREFIX, CONTROL_HEARTBEAT];
+  if (authProof) frames.push(CONTROL_AUTH, authProof);
+  return frames;
 }
 
 // ─── 帧解析 ───────────────────────────────────────────────────────────────────
@@ -166,10 +195,11 @@ export function buildPublishFrames(topic, payloadFrames) {
  *
  * @param {Array} frames - 不含 identity 帧的帧数组
  * @returns {{
- *   kind        : "register"|"unregister"|"publish"|"request"|"response"|"message",
- *   requestId   : string|null,
- *   authKey     : string|null,
- *   topic       : string|null,
+ *   kind         : "register"|"unregister"|"heartbeat"|"publish"|"request"|"response"|"message",
+ *   requestId    : string|null,
+ *   authKey      : string|null,
+ *   authProof    : string|null,
+ *   topic        : string|null,
  *   payloadFrames: Array
  * }}
  */
@@ -180,6 +210,7 @@ export function parseControlFrames(frames) {
       kind: "message",
       requestId: null,
       authKey: null,
+      authProof: null,
       topic: null,
       payloadFrames: frames,
     };
@@ -197,6 +228,7 @@ export function parseControlFrames(frames) {
       kind: "register",
       requestId: null,
       authKey,
+      authProof: null,
       topic: null,
       payloadFrames: [],
     };
@@ -208,6 +240,7 @@ export function parseControlFrames(frames) {
       kind: "unregister",
       requestId: null,
       authKey: null,
+      authProof: null,
       topic: null,
       payloadFrames: [],
     };
@@ -215,10 +248,16 @@ export function parseControlFrames(frames) {
 
   // ── 心跳帧：[PREFIX, "heartbeat"] ─────────────────────────────────────────
   if (action === CONTROL_HEARTBEAT) {
+    let authProof = null;
+    if (frames.length >= 4 && frames[2]?.toString() === CONTROL_AUTH) {
+      authProof = frames[3]?.toString() ?? "";
+    }
+
     return {
       kind: "heartbeat",
       requestId: null,
       authKey: null,
+      authProof,
       topic: null,
       payloadFrames: [],
     };
@@ -227,12 +266,22 @@ export function parseControlFrames(frames) {
   // ── 广播帧：[PREFIX, "pub", topic, ...payloadFrames] ─────────────────────
   if (action === CONTROL_PUB && frames.length >= 3) {
     const topic = frames[2]?.toString() ?? "";
+    let payloadStart = 3;
+    let authProof = null;
+
+    // 广播帧可携带可选认证证明：[PREFIX, "pub", topic, AUTH_MARKER, authProof, ...payload]
+    if (frames.length >= 5 && frames[3]?.toString() === CONTROL_AUTH) {
+      authProof = frames[4]?.toString() ?? "";
+      payloadStart = 5;
+    }
+
     return {
       kind: "publish",
       requestId: null,
       authKey: null,
+      authProof,
       topic,
-      payloadFrames: frames.slice(3),
+      payloadFrames: frames.slice(payloadStart),
     };
   }
 
@@ -245,8 +294,9 @@ export function parseControlFrames(frames) {
     if (requestId) {
       let payloadStart = 3;
       let authKey = null;
+      let authProof = null;
 
-      // 请求帧中可能携带认证 Key（仅 CONTROL_REQ 有此结构）
+      // 请求帧可携带 authKey：[PREFIX, "req", requestId, AUTH_MARKER, authKey, ...payload]
       if (
         action === CONTROL_REQ &&
         frames.length >= 5 &&
@@ -256,10 +306,21 @@ export function parseControlFrames(frames) {
         payloadStart = 5;
       }
 
+      // 响应帧可携带 authProof：[PREFIX, "res", requestId, AUTH_MARKER, authProof, ...payload]
+      if (
+        action === CONTROL_RES &&
+        frames.length >= 5 &&
+        frames[3]?.toString() === CONTROL_AUTH
+      ) {
+        authProof = frames[4]?.toString() ?? "";
+        payloadStart = 5;
+      }
+
       return {
         kind: action === CONTROL_REQ ? "request" : "response",
         requestId,
         authKey,
+        authProof,
         topic: null,
         payloadFrames: frames.slice(payloadStart),
       };
@@ -271,6 +332,7 @@ export function parseControlFrames(frames) {
     kind: "message",
     requestId: null,
     authKey: null,
+    authProof: null,
     topic: null,
     payloadFrames: frames,
   };

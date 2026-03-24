@@ -23,6 +23,8 @@ const master = new ZNL({
   endpoints: { router: "tcp://127.0.0.1:6003" },
   maxPending: 5000,
   authKey: AUTH_KEY,
+  // 启用加密安全模式：自动对 payload 做签名、防重放与透明加密
+  encrypted: true,
 });
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -66,9 +68,9 @@ master.on("error", (error) => {
   console.error("[MASTER][ERROR]", error?.message ?? error);
 });
 
-master.on("auth_failed", ({ identityText, authKey }) => {
+master.on("auth_failed", ({ identityText, reason }) => {
   console.error(
-    `[MASTER][AUTH FAILED] from=${identityText}  provided=${authKey ?? "<none>"}`,
+    `[MASTER][AUTH FAILED] from=${identityText}  reason=${reason ?? "<unknown>"}`,
   );
 });
 

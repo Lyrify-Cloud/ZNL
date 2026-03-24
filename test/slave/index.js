@@ -29,6 +29,7 @@ const slave = new ZNL({
   },
   maxPending: 2000,
   authKey: AUTH_KEY,
+  encrypted: true,
 });
 
 // 辅助函数：将 payload（Buffer 或其他）转为可读字符串

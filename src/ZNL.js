@@ -13,6 +13,10 @@
  *      auth_failed / slave_connected / slave_disconnected
  *      publish / error
  *
+ * 加密模式（encrypted）：
+ *  - false : 明文模式（不签名/不加密）
+ *  - true  : 签名 + 防重放 + payload 透明加密（AES-256-GCM）
+ *
  * 心跳机制：
  *  - slave 每隔 heartbeatInterval ms 向 master 发送一帧心跳
  *  - master 每隔 heartbeatInterval ms 扫描一次在线列表
@@ -28,7 +32,11 @@ import {
   DEFAULT_HEARTBEAT_INTERVAL,
   CONTROL_PREFIX,
   CONTROL_HEARTBEAT,
+  SECURITY_ENVELOPE_VERSION,
+  MAX_TIME_SKEW_MS,
+  REPLAY_WINDOW_MS,
 } from "./constants.js";
+
 import {
   identityToString,
   identityToBuffer,
@@ -36,11 +44,28 @@ import {
   payloadFromFrames,
   buildRegisterFrames,
   buildUnregisterFrames,
+  buildHeartbeatFrames,
   buildRequestFrames,
   buildResponseFrames,
   buildPublishFrames,
   parseControlFrames,
 } from "./protocol.js";
+
+import {
+  ReplayGuard,
+  deriveKeys,
+  toFrameBuffers,
+  digestFrames,
+  generateNonce,
+  nowMs,
+  canonicalSignInput,
+  signText,
+  encodeAuthProofToken,
+  decodeAuthProofToken,
+  encryptFrames,
+  decryptFrames,
+} from "./security.js";
+
 import { PendingManager } from "./PendingManager.js";
 import { SendQueue } from "./SendQueue.js";
 
@@ -49,14 +74,18 @@ export class ZNL extends EventEmitter {
 
   /** @type {"master"|"slave"} */
   role;
+
   /** @type {string} 节点唯一标识，slave 侧同时作为 ZMQ routingId */
   id;
+
   /** @type {{ router: string }} */
   endpoints;
-  /** @type {string} 认证 Key（空字符串表示不启用认证） */
+
+  /** @type {string} 共享认证 Key（仅 encrypted=true 使用） */
   authKey;
-  /** @type {boolean} master 侧是否强制校验认证 Key */
-  requireAuth;
+
+  /** @type {boolean} 是否启用加密安全（签名+防重放+透明加密） */
+  encrypted;
 
   // ─── 运行状态 ─────────────────────────────────────────────────────────────
 
@@ -94,7 +123,7 @@ export class ZNL extends EventEmitter {
   /**
    * master 侧：已注册的在线 slave 表
    * key   = slaveId（字符串）
-   * value = { identity: Buffer（用于 ROUTER 发送）, lastSeen: number（最后心跳时间戳）}
+   * value = { identity: Buffer, lastSeen: number }
    * @type {Map<string, { identity: Buffer, lastSeen: number }>}
    */
   #slaves = new Map();
@@ -116,18 +145,41 @@ export class ZNL extends EventEmitter {
   /** master 侧扫描死节点的定时器句柄 */
   #heartbeatCheckTimer = null;
 
+  // ─── 安全运行时状态 ───────────────────────────────────────────────────────
+
+  /** @type {boolean} 当前是否启用签名安全（auth / encrypted） */
+  #secureEnabled = false;
+
+  /** @type {Buffer|null} HMAC 签名密钥（由 authKey HKDF 派生） */
+  #signKey = null;
+
+  /** @type {Buffer|null} 对称加密密钥（由 authKey HKDF 派生） */
+  #encryptKey = null;
+
+  /** @type {ReplayGuard} 防重放缓存 */
+  #replayGuard;
+
+  /** @type {number} 时间戳最大允许漂移（毫秒） */
+  #maxTimeSkewMs = MAX_TIME_SKEW_MS;
+
+  /** @type {string|null} slave 侧学习到的 master 节点 ID（来自签名证明） */
+  #masterNodeId = null;
+
   // ═══════════════════════════════════════════════════════════════════════════
   //  构造函数
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * @param {{
-   *   role             : "master"|"slave",
-   *   id               : string,
-   *   endpoints?       : { router?: string },
-   *   maxPending?      : number,
-   *   authKey?         : string,
+   *   role               : "master"|"slave",
+   *   id                 : string,
+   *   endpoints?         : { router?: string },
+   *   maxPending?        : number,
+   *   authKey?           : string,
    *   heartbeatInterval? : number,
+   *   encrypted?         : boolean,
+   *   maxTimeSkewMs?     : number,
+   *   replayWindowMs?    : number,
    * }} options
    */
   constructor({
@@ -137,6 +189,9 @@ export class ZNL extends EventEmitter {
     maxPending = 0,
     authKey = "",
     heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL,
+    encrypted = false,
+    maxTimeSkewMs = MAX_TIME_SKEW_MS,
+    replayWindowMs = REPLAY_WINDOW_MS,
   } = {}) {
     super();
 
@@ -151,12 +206,31 @@ export class ZNL extends EventEmitter {
     this.id = String(id);
     this.endpoints = { ...DEFAULT_ENDPOINTS, ...endpoints };
     this.authKey = authKey == null ? "" : String(authKey);
-    this.requireAuth = this.role === "master" && this.authKey.length > 0;
+
+    this.encrypted = Boolean(encrypted);
+    this.#secureEnabled = this.encrypted;
+
+    if (this.#secureEnabled) {
+      if (!this.authKey) {
+        throw new Error("启用 encrypted=true 时，必须提供非空 authKey。");
+      }
+      const { signKey, encryptKey } = deriveKeys(this.authKey);
+      this.#signKey = signKey;
+      this.#encryptKey = encryptKey;
+    }
 
     this.#pending = new PendingManager(maxPending);
     this.#sendQueue = new SendQueue();
     this.#heartbeatInterval =
       this.#normalizeHeartbeatInterval(heartbeatInterval);
+
+    this.#maxTimeSkewMs = this.#normalizePositiveInt(
+      maxTimeSkewMs,
+      MAX_TIME_SKEW_MS,
+    );
+    this.#replayGuard = new ReplayGuard({
+      windowMs: this.#normalizePositiveInt(replayWindowMs, REPLAY_WINDOW_MS),
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -259,16 +333,23 @@ export class ZNL extends EventEmitter {
     const socket = this.#requireSocket("router", "ROUTER");
     if (this.#slaves.size === 0) return;
 
-    const frames = buildPublishFrames(String(topic), normalizeFrames(payload));
+    const topicText = String(topic);
+    const payloadFrames = this.#sealPayloadFrames(
+      "publish",
+      topicText,
+      payload,
+    );
+    const authProof = this.#secureEnabled
+      ? this.#createAuthProof("publish", topicText, payloadFrames)
+      : "";
 
-    // 遍历所有在线 slave，逐一入队发送
-    // 使用 #sendQueue 保证 socket 写入安全，不与 RPC 帧交叉
+    const frames = buildPublishFrames(topicText, payloadFrames, authProof);
+
     for (const [slaveId, entry] of this.#slaves) {
       const idFrame = identityToBuffer(entry.identity);
       this.#sendQueue
         .enqueue("router", () => socket.send([idFrame, ...frames]))
         .catch(() => {
-          // 发送失败说明 slave 已断线，静默移除并通知外部
           if (this.#slaves.delete(slaveId)) {
             this.emit("slave_disconnected", slaveId);
           }
@@ -333,7 +414,6 @@ export class ZNL extends EventEmitter {
         ? this.#startMasterSockets()
         : this.#startSlaveSockets());
     } catch (error) {
-      // 启动失败则回滚所有状态
       this.running = false;
       await this.#teardown();
       throw error;
@@ -348,16 +428,14 @@ export class ZNL extends EventEmitter {
    */
   async #doStop() {
     if (this.role === "slave" && this.#sockets.dealer) {
-      // 先停心跳，避免关闭期间继续发送
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
 
-      // 优雅下线：在关闭 socket 前先发送注销帧
       await this.#sendQueue
         .enqueue("dealer", () =>
           this.#sockets.dealer.send(buildUnregisterFrames()),
         )
-        .catch(() => {}); // master 可能已关闭，忽略发送失败
+        .catch(() => {});
     }
 
     this.running = false;
@@ -370,7 +448,6 @@ export class ZNL extends EventEmitter {
    * 顺序：停止定时器 → 关闭 socket → 等待读循环退出 → 清空所有注册表
    */
   async #teardown() {
-    // 停止心跳相关定时器
     clearInterval(this.#heartbeatTimer);
     clearInterval(this.#heartbeatCheckTimer);
     this.#heartbeatTimer = null;
@@ -386,7 +463,9 @@ export class ZNL extends EventEmitter {
     this.#readLoops = [];
     this.#sockets = {};
     this.#sendQueue.clear();
-    this.#slaves.clear(); // 清空 slave 注册表，避免 restart 时残留旧条目
+    this.#slaves.clear();
+    this.#masterNodeId = null;
+    this.#replayGuard.clear();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -410,19 +489,23 @@ export class ZNL extends EventEmitter {
    * 连接后立即发送注册帧，再启动心跳定时器
    */
   async #startSlaveSockets() {
-    // routingId 即节点 id，Master 侧通过此字段识别发送方身份
     const dealer = new zmq.Dealer({ routingId: this.id });
     dealer.connect(this.endpoints.router);
     this.#sockets.dealer = dealer;
 
     this.#consume(dealer, (frames) => this.#handleDealerFrames(frames));
 
-    // 自动发送注册帧（携带 authKey，供 master 进行认证）
+    // 注册帧：
+    // - encrypted=true  : 发送签名证明令牌（放在 authKey 字段位）
+    // - encrypted=false : 不携带认证信息
+    const registerToken = this.#secureEnabled
+      ? this.#createAuthProof("register", "", [])
+      : "";
+
     await this.#sendQueue.enqueue("dealer", () =>
-      dealer.send(buildRegisterFrames(this.authKey)),
+      dealer.send(buildRegisterFrames(registerToken)),
     );
 
-    // 注册成功后启动心跳
     this.#startHeartbeat();
   }
 
@@ -433,7 +516,6 @@ export class ZNL extends EventEmitter {
   /**
    * 处理 Master 侧 ROUTER 收到的帧
    * ZMQ ROUTER 帧结构：[identity, ...控制帧]
-   * identity 由 ZMQ 自动注入，表示发送方的 routingId
    */
   async #handleRouterFrames(rawFrames) {
     const [identity, ...bodyFrames] = rawFrames;
@@ -448,26 +530,49 @@ export class ZNL extends EventEmitter {
       ...parsed,
     });
 
-    // ── 心跳：更新 slave 的最后活跃时间 ───────────────────────────────────
+    // ── 心跳 ────────────────────────────────────────────────────────────────
     if (parsed.kind === "heartbeat") {
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "heartbeat",
+          proofToken: parsed.authProof,
+          requestId: "",
+          payloadFrames: [],
+          expectedNodeId: identityText,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+      }
+
       const entry = this.#slaves.get(identityText);
       if (entry) entry.lastSeen = Date.now();
       return;
     }
 
-    // ── 注册：slave 上线 ────────────────────────────────────────────────────
+    // ── 注册 ────────────────────────────────────────────────────────────────
     if (parsed.kind === "register") {
-      // 若启用认证，注册时同样校验 authKey
-      if (this.requireAuth && parsed.authKey !== this.authKey) {
-        this.emit("auth_failed", { ...event, expectedAuthKey: this.authKey });
-        return;
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "register",
+          proofToken: parsed.authKey, // register 复用 authKey 字段承载 proof
+          requestId: "",
+          payloadFrames: [],
+          expectedNodeId: identityText,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
       }
+
       this.#slaves.set(identityText, { identity, lastSeen: Date.now() });
       this.emit("slave_connected", identityText);
       return;
     }
 
-    // ── 注销：slave 主动下线 ────────────────────────────────────────────────
+    // ── 注销 ────────────────────────────────────────────────────────────────
     if (parsed.kind === "unregister") {
       if (this.#slaves.delete(identityText)) {
         this.emit("slave_disconnected", identityText);
@@ -475,20 +580,48 @@ export class ZNL extends EventEmitter {
       return;
     }
 
-    // ── RPC 请求：slave 发来的请求 ──────────────────────────────────────────
+    // ── RPC 请求：slave -> master ──────────────────────────────────────────
     if (parsed.kind === "request") {
-      // 认证校验：Key 不匹配则丢弃并触发 auth_failed 事件
-      if (this.requireAuth && parsed.authKey !== this.authKey) {
-        this.emit("auth_failed", { ...event, expectedAuthKey: this.authKey });
-        return;
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "request",
+          proofToken: parsed.authKey, // request 复用 authKey 字段承载 proof
+          requestId: parsed.requestId,
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: identityText,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "request",
+              parsed.requestId,
+              parsed.payloadFrames,
+              identityText,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `请求 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
       }
 
-      this.emit("request", event);
+      const finalPayload = payloadFromFrames(finalFrames);
+      const requestEvent = { ...event, payload: finalPayload };
+      this.emit("request", requestEvent);
 
-      // 有自动回复处理器时，执行并回复
       if (this.#routerAutoHandler) {
         try {
-          const replyPayload = await this.#routerAutoHandler(event);
+          const replyPayload = await this.#routerAutoHandler(requestEvent);
           await this.#replyTo(identity, parsed.requestId, replyPayload);
         } catch (error) {
           this.emit("error", error);
@@ -497,11 +630,46 @@ export class ZNL extends EventEmitter {
       return;
     }
 
-    // ── RPC 响应：slave 回复了 master 之前主动发出的请求 ───────────────────
+    // ── RPC 响应：slave -> master ──────────────────────────────────────────
     if (parsed.kind === "response") {
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "response",
+          proofToken: parsed.authProof,
+          requestId: parsed.requestId,
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: identityText,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "response",
+              parsed.requestId,
+              parsed.payloadFrames,
+              identityText,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `响应 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      }
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const responseEvent = { ...event, payload: finalPayload };
       const key = this.#pending.key(parsed.requestId, identityText);
-      this.#pending.resolve(key, event);
-      this.emit("response", event);
+      this.#pending.resolve(key, responseEvent);
+      this.emit("response", responseEvent);
     }
   }
 
@@ -515,14 +683,49 @@ export class ZNL extends EventEmitter {
 
     const event = this.#buildAndEmit("dealer", frames, { payload, ...parsed });
 
-    // ── PUB 广播：master 推送的消息 ────────────────────────────────────────
+    // ── PUB 广播：master -> slave ──────────────────────────────────────────
     if (parsed.kind === "publish") {
-      const pubEvent = { topic: parsed.topic, payload };
+      let finalFrames = parsed.payloadFrames;
 
-      // 触发统一广播事件（所有 topic 都会触发，方便兜底监听）
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "publish",
+          proofToken: parsed.authProof,
+          requestId: parsed.topic ?? "",
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: this.#masterNodeId,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        // 第一次学习 master 节点 ID，后续锁定
+        if (!this.#masterNodeId) this.#masterNodeId = v.envelope.nodeId;
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "publish",
+              parsed.topic ?? "",
+              parsed.payloadFrames,
+              this.#masterNodeId,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `广播 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      }
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const pubEvent = { topic: parsed.topic, payload: finalPayload };
+
       this.emit("publish", pubEvent);
 
-      // 触发精确 topic 订阅处理器
       const handler = this.#subscriptions.get(parsed.topic);
       if (handler) {
         try {
@@ -534,13 +737,50 @@ export class ZNL extends EventEmitter {
       return;
     }
 
-    // ── RPC 请求：master 主动发来的请求 ────────────────────────────────────
+    // ── RPC 请求：master -> slave ──────────────────────────────────────────
     if (parsed.kind === "request") {
-      this.emit("request", event);
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "request",
+          proofToken: parsed.authKey, // request 复用 authKey 字段承载 proof
+          requestId: parsed.requestId,
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: this.#masterNodeId,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        if (!this.#masterNodeId) this.#masterNodeId = v.envelope.nodeId;
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "request",
+              parsed.requestId,
+              parsed.payloadFrames,
+              this.#masterNodeId,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `请求 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      }
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const requestEvent = { ...event, payload: finalPayload };
+      this.emit("request", requestEvent);
 
       if (this.#dealerAutoHandler) {
         try {
-          const replyPayload = await this.#dealerAutoHandler(event);
+          const replyPayload = await this.#dealerAutoHandler(requestEvent);
           await this.#reply(parsed.requestId, replyPayload);
         } catch (error) {
           this.emit("error", error);
@@ -549,11 +789,48 @@ export class ZNL extends EventEmitter {
       return;
     }
 
-    // ── RPC 响应：master 回复了 slave 之前发出的请求 ───────────────────────
+    // ── RPC 响应：master -> slave ──────────────────────────────────────────
     if (parsed.kind === "response") {
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "response",
+          proofToken: parsed.authProof,
+          requestId: parsed.requestId,
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: this.#masterNodeId,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        if (!this.#masterNodeId) this.#masterNodeId = v.envelope.nodeId;
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "response",
+              parsed.requestId,
+              parsed.payloadFrames,
+              this.#masterNodeId,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `响应 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      }
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const responseEvent = { ...event, payload: finalPayload };
       const key = this.#pending.key(parsed.requestId);
-      this.#pending.resolve(key, event);
-      this.emit("response", event);
+      this.#pending.resolve(key, responseEvent);
+      this.emit("response", responseEvent);
     }
   }
 
@@ -563,7 +840,6 @@ export class ZNL extends EventEmitter {
 
   /**
    * Slave → Master：通过 DEALER socket 发送 RPC 请求，返回响应 Promise
-   * 流程：创建 pending → 入队等待发送 → 发送后启动超时计时 → 等待响应 resolve
    */
   async #request(payload, { timeoutMs } = {}) {
     const socket = this.#requireSocket("dealer", "DEALER");
@@ -576,13 +852,18 @@ export class ZNL extends EventEmitter {
       timeoutMs,
       requestId,
     );
-    const frames = buildRequestFrames(
-      requestId,
-      normalizeFrames(payload),
-      this.authKey,
-    );
 
-    // 入队：等前一个发送完成后再发；发送完毕后立即启动超时计时
+    const payloadFrames = this.#sealPayloadFrames(
+      "request",
+      requestId,
+      payload,
+    );
+    const proofOrAuthKey = this.#secureEnabled
+      ? this.#createAuthProof("request", requestId, payloadFrames)
+      : "";
+
+    const frames = buildRequestFrames(requestId, payloadFrames, proofOrAuthKey);
+
     this.#sendQueue
       .enqueue("dealer", async () => {
         startTimer();
@@ -602,6 +883,7 @@ export class ZNL extends EventEmitter {
 
     const identityText = identityToString(identity);
     const idFrame = identityToBuffer(identity);
+
     const requestId = randomUUID();
     const key = this.#pending.key(requestId, identityText);
     const { promise, startTimer } = this.#pending.create(
@@ -610,16 +892,21 @@ export class ZNL extends EventEmitter {
       requestId,
       identityText,
     );
-    const frames = buildRequestFrames(
+
+    const payloadFrames = this.#sealPayloadFrames(
+      "request",
       requestId,
-      normalizeFrames(payload),
-      this.authKey,
+      payload,
     );
+    const proofOrAuthKey = this.#secureEnabled
+      ? this.#createAuthProof("request", requestId, payloadFrames)
+      : "";
+
+    const frames = buildRequestFrames(requestId, payloadFrames, proofOrAuthKey);
 
     this.#sendQueue
       .enqueue("router", async () => {
         startTimer();
-        // ROUTER socket 发送时必须在最前面附上 identity 帧
         await socket.send([idFrame, ...frames]);
       })
       .catch((error) => this.#pending.reject(key, error));
@@ -638,7 +925,17 @@ export class ZNL extends EventEmitter {
    */
   async #reply(requestId, payload) {
     const socket = this.#requireSocket("dealer", "DEALER");
-    const frames = buildResponseFrames(requestId, normalizeFrames(payload));
+
+    const payloadFrames = this.#sealPayloadFrames(
+      "response",
+      requestId,
+      payload,
+    );
+    const authProof = this.#secureEnabled
+      ? this.#createAuthProof("response", requestId, payloadFrames)
+      : "";
+
+    const frames = buildResponseFrames(requestId, payloadFrames, authProof);
     await this.#sendQueue.enqueue("dealer", () => socket.send(frames));
   }
 
@@ -651,7 +948,17 @@ export class ZNL extends EventEmitter {
   async #replyTo(identity, requestId, payload) {
     const socket = this.#requireSocket("router", "ROUTER");
     const idFrame = identityToBuffer(identity);
-    const frames = buildResponseFrames(requestId, normalizeFrames(payload));
+
+    const payloadFrames = this.#sealPayloadFrames(
+      "response",
+      requestId,
+      payload,
+    );
+    const authProof = this.#secureEnabled
+      ? this.#createAuthProof("response", requestId, payloadFrames)
+      : "";
+
+    const frames = buildResponseFrames(requestId, payloadFrames, authProof);
     await this.#sendQueue.enqueue("router", () =>
       socket.send([idFrame, ...frames]),
     );
@@ -663,29 +970,34 @@ export class ZNL extends EventEmitter {
 
   /**
    * 启动 slave 侧心跳发送定时器
-   * 每隔 #heartbeatInterval ms 向 master 发送一帧心跳，证明自己还活着
    */
   #startHeartbeat() {
     if (this.#heartbeatInterval <= 0) return;
 
     this.#heartbeatTimer = setInterval(() => {
       if (!this.running || !this.#sockets.dealer) return;
+
+      const proof = this.#secureEnabled
+        ? this.#createAuthProof("heartbeat", "", [])
+        : "";
+
+      // plain 模式仍保持历史帧结构 [CONTROL_PREFIX, CONTROL_HEARTBEAT]
+      const frames = this.#secureEnabled
+        ? buildHeartbeatFrames(proof)
+        : [CONTROL_PREFIX, CONTROL_HEARTBEAT];
+
       this.#sendQueue
-        .enqueue("dealer", () =>
-          this.#sockets.dealer.send([CONTROL_PREFIX, CONTROL_HEARTBEAT]),
-        )
-        .catch(() => {}); // 发送失败静默处理，不影响业务
+        .enqueue("dealer", () => this.#sockets.dealer.send(frames))
+        .catch(() => {});
     }, this.#heartbeatInterval);
   }
 
   /**
    * 启动 master 侧死节点扫描定时器
-   * 每隔 #heartbeatInterval ms 扫描一次，将超过 3 个周期未活跃的 slave 视为崩溃并移除
    */
   #startHeartbeatCheck() {
     if (this.#heartbeatInterval <= 0) return;
 
-    // 超时阈值 = 3 个心跳周期，给网络抖动留出充分余量
     const timeout = this.#heartbeatInterval * 3;
 
     this.#heartbeatCheckTimer = setInterval(() => {
@@ -700,13 +1012,194 @@ export class ZNL extends EventEmitter {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  //  安全辅助（签名/防重放/加密）
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * 生成签名证明令牌
+   *
+   * @param {"register"|"heartbeat"|"request"|"response"|"publish"} kind
+   * @param {string} requestId
+   * @param {Buffer[]} payloadFrames
+   * @returns {string}
+   */
+  #createAuthProof(kind, requestId, payloadFrames) {
+    if (!this.#secureEnabled || !this.#signKey) return "";
+
+    const envelope = {
+      kind: String(kind),
+      nodeId: this.id,
+      requestId: String(requestId ?? ""),
+      timestamp: nowMs(),
+      nonce: generateNonce(),
+      payloadDigest: digestFrames(payloadFrames),
+    };
+
+    // 保留 canonical 文本，便于后续排障（签名实际在 token 内完成）
+    canonicalSignInput(envelope);
+
+    return encodeAuthProofToken(this.#signKey, envelope);
+  }
+
+  /**
+   * 校验入站签名证明 + 防重放 + 摘要一致性
+   *
+   * @param {{
+   *   kind: "register"|"heartbeat"|"request"|"response"|"publish",
+   *   proofToken: string|null,
+   *   requestId: string|null,
+   *   payloadFrames: Buffer[],
+   *   expectedNodeId?: string|null,
+   * }} input
+   * @returns {{ ok: true, envelope: any } | { ok: false, error: string }}
+   */
+  #verifyIncomingProof({
+    kind,
+    proofToken,
+    requestId,
+    payloadFrames,
+    expectedNodeId = null,
+  }) {
+    if (!this.#secureEnabled) return { ok: true, envelope: null };
+    if (!this.#signKey) {
+      return { ok: false, error: "签名密钥未初始化。" };
+    }
+
+    if (!proofToken) {
+      return { ok: false, error: "缺少认证证明（proofToken）。" };
+    }
+
+    const decoded = decodeAuthProofToken(this.#signKey, proofToken, {
+      maxSkewMs: this.#maxTimeSkewMs,
+      now: Date.now(),
+    });
+    if (!decoded.ok) {
+      return { ok: false, error: decoded.error || "认证证明解析失败。" };
+    }
+
+    const envelope = decoded.envelope;
+
+    if (envelope.kind !== String(kind)) {
+      return {
+        ok: false,
+        error: `证明 kind 不匹配：expect=${kind}, got=${envelope.kind}`,
+      };
+    }
+
+    if (String(envelope.requestId ?? "") !== String(requestId ?? "")) {
+      return {
+        ok: false,
+        error: `证明 requestId 不匹配：expect=${requestId ?? ""}, got=${envelope.requestId ?? ""}`,
+      };
+    }
+
+    if (expectedNodeId && String(envelope.nodeId) !== String(expectedNodeId)) {
+      return {
+        ok: false,
+        error: `证明 nodeId 不匹配：expect=${expectedNodeId}, got=${envelope.nodeId}`,
+      };
+    }
+
+    const currentDigest = digestFrames(payloadFrames);
+    if (String(envelope.payloadDigest) !== currentDigest) {
+      return { ok: false, error: "payload 摘要不一致，疑似篡改。" };
+    }
+
+    const replayKey = `${envelope.kind}|${envelope.nodeId}|${envelope.nonce}`;
+    if (this.#replayGuard.seenOrAdd(replayKey)) {
+      return { ok: false, error: "检测到重放请求（nonce 重复）。" };
+    }
+
+    return { ok: true, envelope };
+  }
+
+  /**
+   * 出站 payload 处理：
+   * - plain/auth   : 维持原有 normalizeFrames
+   * - encrypted    : 透明加密为安全信封
+   *
+   * @param {"request"|"response"|"publish"} kind
+   * @param {string} requestId
+   * @param {*} payload
+   * @returns {Buffer[]}
+   */
+  #sealPayloadFrames(kind, requestId, payload) {
+    if (!this.encrypted) {
+      // 非加密模式保持历史行为：沿用协议层的原始帧类型（string/Buffer）
+      return normalizeFrames(payload);
+    }
+
+    if (!this.#encryptKey) {
+      throw new Error("加密密钥未初始化。");
+    }
+
+    const rawFrames = toFrameBuffers(payload);
+    const aad = Buffer.from(
+      `znl-aad-v1|${String(kind)}|${String(this.id)}|${String(requestId ?? "")}`,
+      "utf8",
+    );
+
+    const { iv, ciphertext, tag } = encryptFrames(
+      this.#encryptKey,
+      rawFrames,
+      aad,
+    );
+
+    // 用统一信封包装：version + iv + tag + ciphertext
+    return [Buffer.from(SECURITY_ENVELOPE_VERSION), iv, tag, ciphertext];
+  }
+
+  /**
+   * 入站 payload 解封：
+   * - encrypted=true 时要求收到加密信封
+   * - 解密后恢复为 Buffer[]，再由 payloadFromFrames 还原
+   *
+   * @param {"request"|"response"|"publish"} kind
+   * @param {string} requestId
+   * @param {Buffer[]} payloadFrames
+   * @param {string} senderNodeId
+   * @returns {Buffer[]}
+   */
+  #openPayloadFrames(kind, requestId, payloadFrames, senderNodeId) {
+    if (!this.encrypted) return payloadFrames;
+    if (!this.#encryptKey) throw new Error("加密密钥未初始化。");
+
+    if (!Array.isArray(payloadFrames) || payloadFrames.length !== 4) {
+      throw new Error("加密信封格式非法：期望 4 帧。");
+    }
+
+    const [version, iv, tag, ciphertext] = payloadFrames;
+    if (String(version?.toString?.() ?? "") !== SECURITY_ENVELOPE_VERSION) {
+      throw new Error("加密信封版本不匹配。");
+    }
+
+    const aad = Buffer.from(
+      `znl-aad-v1|${String(kind)}|${String(senderNodeId)}|${String(requestId ?? "")}`,
+      "utf8",
+    );
+
+    return decryptFrames(this.#encryptKey, iv, ciphertext, tag, aad);
+  }
+
+  /**
+   * 触发统一 auth_failed 事件
+   * @param {object} baseEvent
+   * @param {string} reason
+   */
+  #emitAuthFailed(baseEvent, reason) {
+    this.emit("auth_failed", {
+      ...baseEvent,
+      reason: String(reason ?? "认证失败"),
+      encrypted: this.encrypted,
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   //  工具方法
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * 启动 socket 的异步读取循环（for-await-of）
-   * 循环在 socket 被关闭后自然退出，Promise 保存到 #readLoops 供 teardown 等待
-   *
    * @param {import("zeromq").Socket} socket
    * @param {(frames: Array) => Promise<void>} handler
    */
@@ -715,7 +1208,6 @@ export class ZNL extends EventEmitter {
       try {
         for await (const rawFrames of socket) {
           if (!this.running) return;
-          // zeromq v6 单帧时返回 Buffer，多帧时返回数组，统一转为数组处理
           const frames = Array.isArray(rawFrames) ? rawFrames : [rawFrames];
           try {
             await handler(frames);
@@ -724,7 +1216,6 @@ export class ZNL extends EventEmitter {
           }
         }
       } catch (error) {
-        // socket 关闭时 for-await 会抛出，仅在运行中时才视为错误
         if (this.running) this.emit("error", error);
       }
     })();
@@ -737,7 +1228,7 @@ export class ZNL extends EventEmitter {
    * @param {string} channel
    * @param {Array} frames
    * @param {object} extra
-   * @returns {object} 事件对象
+   * @returns {object}
    */
   #buildAndEmit(channel, frames, extra = {}) {
     const event = { channel, frames, ...extra };
@@ -747,7 +1238,7 @@ export class ZNL extends EventEmitter {
   }
 
   /**
-   * 获取指定 socket，不存在时抛出明确的错误提示
+   * 获取指定 socket，不存在时抛出明确错误
    * @param {string} name
    * @param {string} displayName
    * @returns {import("zeromq").Socket}
@@ -769,5 +1260,17 @@ export class ZNL extends EventEmitter {
     const v = Number(n);
     if (Number.isFinite(v) && v >= 0) return Math.floor(v);
     return DEFAULT_HEARTBEAT_INTERVAL;
+  }
+
+  /**
+   * 规范化正整数（<=0 时回退默认值）
+   * @param {*} n
+   * @param {number} fallback
+   * @returns {number}
+   */
+  #normalizePositiveInt(n, fallback) {
+    const v = Number(n);
+    if (Number.isFinite(v) && v > 0) return Math.floor(v);
+    return fallback;
   }
 }

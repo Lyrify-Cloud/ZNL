@@ -40,3 +40,27 @@ export const DEFAULT_HEARTBEAT_INTERVAL = 3000;
 export const DEFAULT_ENDPOINTS = {
   router: "tcp://127.0.0.1:6003",
 };
+
+/** 安全信封版本标识（用于区分普通帧与带安全元数据的帧） */
+export const SECURITY_ENVELOPE_VERSION = "__znl_sec_v1__";
+
+/** 允许的最大时间偏移（毫秒），超过则视为可疑重放 */
+export const MAX_TIME_SKEW_MS = 30_000;
+
+/** Nonce 去重保留窗口（毫秒），用于重放检测 */
+export const REPLAY_WINDOW_MS = 120_000;
+
+/** AES-GCM 推荐 IV 长度（字节） */
+export const ENCRYPT_IV_BYTES = 12;
+
+/** AES-GCM 认证标签长度（字节） */
+export const ENCRYPT_TAG_BYTES = 16;
+
+/** 对称加密算法（基于 authKey 派生出的密钥） */
+export const ENCRYPT_ALGORITHM = "aes-256-gcm";
+
+/** 密钥派生用途标签：加密 */
+export const KDF_INFO_ENCRYPT = "znl-kdf-encrypt-v1";
+
+/** 密钥派生用途标签：签名 */
+export const KDF_INFO_SIGN = "znl-kdf-sign-v1";
