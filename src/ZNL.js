@@ -20,7 +20,8 @@
  * 心跳机制：
  *  - slave 每隔 heartbeatInterval ms 向 master 发送一帧心跳
  *  - master 每隔 heartbeatInterval ms 扫描一次在线列表
- *  - 超过 heartbeatInterval × 3 ms 未收到心跳，判定 slave 已崩溃并移除
+ *  - 超过 heartbeatTimeoutMs 未收到心跳，判定 slave 已崩溃并移除
+ *    （heartbeatTimeoutMs <= 0 时，默认按 heartbeatInterval × 3 计算）
  */
 
 import { randomUUID } from "node:crypto";
@@ -30,6 +31,9 @@ import * as zmq from "zeromq";
 import {
   DEFAULT_ENDPOINTS,
   DEFAULT_HEARTBEAT_INTERVAL,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
+  DEFAULT_MAX_PENDING,
+  DEFAULT_ENABLE_PAYLOAD_DIGEST,
   CONTROL_PREFIX,
   CONTROL_HEARTBEAT,
   SECURITY_ENVELOPE_VERSION,
@@ -59,7 +63,6 @@ import {
   generateNonce,
   nowMs,
   canonicalSignInput,
-  signText,
   encodeAuthProofToken,
   decodeAuthProofToken,
   encryptFrames,
@@ -118,6 +121,12 @@ export class ZNL extends EventEmitter {
   /** @type {Function|null} slave 侧收到 master 请求时的自动回复处理器 */
   #dealerAutoHandler = null;
 
+  /** @type {number} 心跳超时时间（ms），0 表示使用 interval × 3 */
+  #heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS;
+
+  /** @type {boolean} 是否启用 payload 摘要校验（安全模式用） */
+  #enablePayloadDigest = DEFAULT_ENABLE_PAYLOAD_DIGEST;
+
   // ─── PUB/SUB 状态 ────────────────────────────────────────────────────────
 
   /**
@@ -174,22 +183,26 @@ export class ZNL extends EventEmitter {
    *   role               : "master"|"slave",
    *   id                 : string,
    *   endpoints?         : { router?: string },
-   *   maxPending?        : number,
-   *   authKey?           : string,
-   *   heartbeatInterval? : number,
-   *   encrypted?         : boolean,
-   *   maxTimeSkewMs?     : number,
-   *   replayWindowMs?    : number,
+   *   maxPending?          : number,
+   *   authKey?             : string,
+   *   heartbeatInterval?   : number,
+   *   heartbeatTimeoutMs?  : number,
+   *   encrypted?           : boolean,
+   *   enablePayloadDigest? : boolean,
+   *   maxTimeSkewMs?       : number,
+   *   replayWindowMs?      : number,
    * }} options
    */
   constructor({
     role,
     id,
     endpoints = {},
-    maxPending = 0,
+    maxPending = DEFAULT_MAX_PENDING,
     authKey = "",
     heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL,
+    heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
     encrypted = false,
+    enablePayloadDigest = DEFAULT_ENABLE_PAYLOAD_DIGEST,
     maxTimeSkewMs = MAX_TIME_SKEW_MS,
     replayWindowMs = REPLAY_WINDOW_MS,
   } = {}) {
@@ -223,6 +236,15 @@ export class ZNL extends EventEmitter {
     this.#sendQueue = new SendQueue();
     this.#heartbeatInterval =
       this.#normalizeHeartbeatInterval(heartbeatInterval);
+
+    // 是否启用 payload 摘要校验（安全模式用）
+    this.#enablePayloadDigest = Boolean(enablePayloadDigest);
+
+    // 心跳超时：<=0 则由 heartbeatInterval 推导
+    this.#heartbeatTimeoutMs = this.#normalizePositiveInt(
+      heartbeatTimeoutMs,
+      DEFAULT_HEARTBEAT_TIMEOUT_MS,
+    );
 
     this.#maxTimeSkewMs = this.#normalizePositiveInt(
       maxTimeSkewMs,
@@ -998,7 +1020,11 @@ export class ZNL extends EventEmitter {
   #startHeartbeatCheck() {
     if (this.#heartbeatInterval <= 0) return;
 
-    const timeout = this.#heartbeatInterval * 3;
+    // 心跳超时：优先使用配置值，<=0 则回退到 interval × 3
+    const timeout =
+      this.#heartbeatTimeoutMs > 0
+        ? this.#heartbeatTimeoutMs
+        : this.#heartbeatInterval * 3;
 
     this.#heartbeatCheckTimer = setInterval(() => {
       const now = Date.now();
@@ -1032,7 +1058,10 @@ export class ZNL extends EventEmitter {
       requestId: String(requestId ?? ""),
       timestamp: nowMs(),
       nonce: generateNonce(),
-      payloadDigest: digestFrames(payloadFrames),
+      // 可选 payload 摘要：关闭时写空串以提升性能
+      payloadDigest: this.#enablePayloadDigest
+        ? digestFrames(payloadFrames)
+        : "",
     };
 
     // 保留 canonical 文本，便于后续排障（签名实际在 token 内完成）
@@ -1100,12 +1129,15 @@ export class ZNL extends EventEmitter {
       };
     }
 
-    const currentDigest = digestFrames(payloadFrames);
-    if (String(envelope.payloadDigest) !== currentDigest) {
-      return { ok: false, error: "payload 摘要不一致，疑似篡改。" };
+    if (this.#enablePayloadDigest) {
+      const currentDigest = digestFrames(payloadFrames);
+      if (String(envelope.payloadDigest) !== currentDigest) {
+        return { ok: false, error: "payload 摘要不一致，疑似篡改。" };
+      }
     }
 
-    const replayKey = `${envelope.kind}|${envelope.nodeId}|${envelope.nonce}`;
+    // 重放 key 加入 requestId，降低 nonce 碰撞误杀风险
+    const replayKey = `${envelope.kind}|${envelope.nodeId}|${envelope.requestId}|${envelope.nonce}`;
     if (this.#replayGuard.seenOrAdd(replayKey)) {
       return { ok: false, error: "检测到重放请求（nonce 重复）。" };
     }

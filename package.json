@@ -17,10 +17,16 @@
     "example:master": "node test/master/index.js",
     "example:slave": "node test/slave/index.js",
     "test": "node test/run.js",
+    "test:unit": "node --test \"test/unit/**/*.test.js\"",
+    "test:all": "pnpm test && pnpm test:unit",
     "test:echo": "node test/master/test-echo-server.js",
     "test:100": "node test/slave/test-100-concurrent.js",
     "test:capture": "node test/capture-frames.js",
-    "check": "node --check index.js && node --check src/constants.js && node --check src/protocol.js && node --check src/security.js && node --check src/PendingManager.js && node --check src/SendQueue.js && node --check src/ZNL.js && node --check test/master/index.js && node --check test/slave/index.js && node --check test/master/test-echo-server.js && node --check test/slave/test-100-concurrent.js && node --check test/run.js"
+    "check": "node --check index.js && node --check src/constants.js && node --check src/protocol.js && node --check src/security.js && node --check src/PendingManager.js && node --check src/SendQueue.js && node --check src/ZNL.js && node --check test/master/index.js && node --check test/slave/index.js && node --check test/master/test-echo-server.js && node --check test/slave/test-100-concurrent.js && node --check test/run.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier . --check",
+    "format:write": "prettier . --write"
   },
   "keywords": [
     "zeromq",
@@ -43,6 +49,11 @@
   },
   "dependencies": {
     "zeromq": "^6.5.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "eslint-plugin-import": "^2.29.1",
+    "prettier": "^3.2.5"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

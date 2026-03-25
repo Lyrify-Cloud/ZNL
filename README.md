@@ -13,6 +13,8 @@
 - 加密开关 `encrypted`：
   - `false`：明文模式（不签名/不加密）
   - `true`：签名 + 防重放 + payload 透明加密（AES-256-GCM）
+- 可选关闭 payload 摘要校验（`enablePayloadDigest=false`）以提升性能
+  - 建议 master/slave 两端保持一致配置，避免认证不一致
 - `authKey` 仅在 `encrypted=true` 时必填
 - Payload 支持 `string`、`Buffer`、`Uint8Array` 及其数组（多帧）
 
@@ -99,9 +101,12 @@ new ZNL({
   endpoints: {
     router: "tcp://127.0.0.1:6003",
   },
-  maxPending: 0,
+  maxPending: 1000,
   authKey: "",
+  heartbeatInterval: 3000,
+  heartbeatTimeoutMs: 0,
   encrypted: false,
+  enablePayloadDigest: true,
   maxTimeSkewMs: 30000,
   replayWindowMs: 120000,
 });
@@ -112,9 +117,12 @@ new ZNL({
 | `role` | ✓ | 节点角色，`"master"` 或 `"slave"` |
 | `id` | ✓ | 节点唯一标识；slave 端同时作为 ZMQ `routingId` |
 | `endpoints.router` | | ROUTER 端点，默认 `tcp://127.0.0.1:6003` |
-| `maxPending` | | 最大并发 RPC 请求数，`0` 表示不限制 |
+| `maxPending` | | 最大并发 RPC 请求数，默认 `1000`；`0` 表示不限制 |
 | `authKey` | | 共享认证 Key；仅在 `encrypted=true` 时必填（用于签名/加密） |
+| `heartbeatInterval` | | 心跳间隔（毫秒），默认 `3000`，`0` 表示禁用心跳 |
+| `heartbeatTimeoutMs` | | 心跳超时时间（毫秒），默认 `0` 表示使用 `heartbeatInterval × 3` |
 | `encrypted` | | 是否启用加密：`false`（默认，明文） / `true`（签名+防重放+透明加密） |
+| `enablePayloadDigest` | | 是否启用 payload 摘要校验，默认 `true`（关闭可提升性能） |
 | `maxTimeSkewMs` | | 时间戳最大允许偏移（毫秒），默认 `30000`，用于防重放校验 |
 | `replayWindowMs` | | nonce 重放缓存窗口（毫秒），默认 `120000` |
 

@@ -6,17 +6,15 @@
  * 虽然 zeromq.js v6 在 JS 层做了一定保护，但显式串行化更安全可靠。
  *
  * 实现原理：
- * 为每个 socket 通道维护一条 Promise 链（队列尾指针）。
- * 每次入队时，新任务追加在当前链尾，前一个任务完成后自动触发。
- * 无论前一个任务成功或失败，队列都会继续执行下一个任务。
+ * 为每个 socket 通道维护一个任务队列与独立消费循环。
+ * 通过单线程 async loop 串行执行，避免长 Promise 链增长。
  */
-
 export class SendQueue {
   /**
-   * 各通道的队列尾指针
-   * @type {Map<string, Promise<void>>}
+   * 通道级队列与运行状态
+   * @type {Map<string, { queue: Array<{ task: Function, resolve: Function, reject: Function }>, running: boolean }>}
    */
-  #tails = new Map();
+  #channels = new Map();
 
   /**
    * 将发送任务追加到指定通道的队列尾部
@@ -26,22 +24,58 @@ export class SendQueue {
    * @returns {Promise<void>} 本次任务的 Promise（可用于错误捕获）
    */
   enqueue(channel, task) {
-    const tail = this.#tails.get(channel) ?? Promise.resolve();
+    const name = String(channel);
+    const entry = this.#ensureChannel(name);
 
-    // 无论前一个任务成功或失败，都继续执行当前任务
-    const run = tail.then(task, task);
-
-    // 更新队尾（吞掉错误，防止产生 UnhandledRejection）
-    this.#tails.set(channel, run.catch(() => {}));
-
-    return run;
+    return new Promise((resolve, reject) => {
+      entry.queue.push({ task, resolve, reject });
+      if (!entry.running) this.#drain(name, entry);
+    });
   }
 
   /**
    * 清空所有通道的队列引用（节点停止时调用）
-   * 注意：已入队但未执行的任务不会被取消，仅释放尾指针引用
+   * 注意：已入队但未执行的任务不会被取消，仅释放引用
    */
   clear() {
-    this.#tails.clear();
+    this.#channels.clear();
+  }
+
+  /**
+   * 确保通道数据结构存在
+   * @param {string} name
+   * @returns {{ queue: Array, running: boolean }}
+   */
+  #ensureChannel(name) {
+    let entry = this.#channels.get(name);
+    if (!entry) {
+      entry = { queue: [], running: false };
+      this.#channels.set(name, entry);
+    }
+    return entry;
+  }
+
+  /**
+   * 串行消费队列
+   * @param {string} name
+   * @param {{ queue: Array, running: boolean }} entry
+   */
+  async #drain(name, entry) {
+    entry.running = true;
+
+    while (entry.queue.length > 0) {
+      const { task, resolve, reject } = entry.queue.shift();
+      try {
+        await task();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    }
+
+    entry.running = false;
+
+    // 清理空通道，避免 Map 无限增长
+    if (entry.queue.length === 0) this.#channels.delete(name);
   }
 }

@@ -385,11 +385,29 @@ export function decodeAuthProofToken(
 
 /**
  * 计算 payload 帧摘要（sha256 hex）
+ * 说明：按协议顺序增量写入，避免一次性拼接大 Buffer
  * @param {Buffer[]} frames
  * @returns {string}
  */
 export function digestFrames(frames) {
-  return createHash("sha256").update(encodeFrames(frames)).digest("hex");
+  const safeFrames = Array.isArray(frames) ? frames : [];
+  const hash = createHash("sha256");
+
+  // 写入帧数量（u32be）
+  const head = Buffer.allocUnsafe(4);
+  head.writeUInt32BE(safeFrames.length, 0);
+  hash.update(head);
+
+  // 逐帧写入长度与内容（u32be + bytes）
+  for (const frame of safeFrames) {
+    const buf = toBuffer(frame);
+    const len = Buffer.allocUnsafe(4);
+    len.writeUInt32BE(buf.length, 0);
+    hash.update(len);
+    if (buf.length > 0) hash.update(buf);
+  }
+
+  return hash.digest("hex");
 }
 
 /**

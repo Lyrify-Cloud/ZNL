@@ -36,6 +36,15 @@ export const DEFAULT_TIMEOUT_MS = 5000;
 /** 默认心跳间隔（毫秒），0 表示禁用心跳 */
 export const DEFAULT_HEARTBEAT_INTERVAL = 3000;
 
+/** 默认心跳超时时间（毫秒），0 表示采用 heartbeatInterval × 3 */
+export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 0;
+
+/** 默认最大并发请求数（0 表示不限制） */
+export const DEFAULT_MAX_PENDING = 1000;
+
+/** 默认是否启用 payload 摘要（安全模式用） */
+export const DEFAULT_ENABLE_PAYLOAD_DIGEST = true;
+
 /** 默认端点配置 */
 export const DEFAULT_ENDPOINTS = {
   router: "tcp://127.0.0.1:6003",

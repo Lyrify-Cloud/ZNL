@@ -811,6 +811,82 @@ await test("encrypted 模式：RPC + PUB/SUB 正常（透明加解密）", async
   await m10.stop();
 });
 
+await test("encrypted 模式：关闭 payloadDigest 后仍可通信", async () => {
+  const EP12 = "tcp://127.0.0.1:16020";
+  const KEY = "sec-encrypted-key-012";
+
+  const m12 = new ZNL({
+    role: "master",
+    id: "m12",
+    endpoints: { router: EP12 },
+    authKey: KEY,
+    encrypted: true,
+    enablePayloadDigest: false, // 关闭摘要校验
+  });
+  const s12 = new ZNL({
+    role: "slave",
+    id: "s12",
+    endpoints: { router: EP12 },
+    authKey: KEY,
+    encrypted: true,
+    enablePayloadDigest: false,
+  });
+
+  m12.ROUTER(async ({ payload }) => `M12:${toText(payload)}`);
+
+  await m12.start();
+  await s12.start();
+  await delay(150);
+
+  const r = await s12.DEALER("no-digest", { timeoutMs: 2000 });
+  assert(toText(r) === "M12:no-digest", `关闭摘要仍可通信 → "${toText(r)}"`);
+
+  await s12.stop();
+  await m12.stop();
+});
+
+await test("encrypted 模式：payloadDigest 配置不一致可能导致认证失败", async () => {
+  const EP13 = "tcp://127.0.0.1:16021";
+  const KEY = "sec-encrypted-key-013";
+
+  const m13 = new ZNL({
+    role: "master",
+    id: "m13",
+    endpoints: { router: EP13 },
+    authKey: KEY,
+    encrypted: true,
+    enablePayloadDigest: true,
+  });
+  const s13 = new ZNL({
+    role: "slave",
+    id: "s13",
+    endpoints: { router: EP13 },
+    authKey: KEY,
+    encrypted: true,
+    enablePayloadDigest: false, // 故意不一致
+  });
+
+  let authFailedFired = false;
+  m13.on("auth_failed", () => {
+    authFailedFired = true;
+  });
+
+  await m13.start();
+  await s13.start();
+  await delay(150);
+
+  try {
+    await s13.DEALER("digest-mismatch", { timeoutMs: 800 });
+    assert(false, "配置不一致不应收到响应");
+  } catch (e) {
+    assert(e.message.includes("请求超时"), `请求正确超时 → "${e.message}"`);
+    assert(authFailedFired, "master 侧 auth_failed 事件已触发");
+  } finally {
+    await s13.stop();
+    await m13.stop();
+  }
+});
+
 await test("encrypted 模式：错误 authKey 无法通信，并触发 auth_failed", async () => {
   const EP11 = "tcp://127.0.0.1:16013";
 
