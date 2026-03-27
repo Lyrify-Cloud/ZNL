@@ -1462,6 +1462,16 @@ await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
   await sSw2.start();
   await delay(150);
 
+  let registered = false;
+  for (let i = 0; i < 20; i++) {
+    if (mS.slaves.includes("sSw")) {
+      registered = true;
+      break;
+    }
+    await delay(100);
+  }
+  runner.assert(registered, `重连后注册成功 → ${mS.slaves}`);
+
   const r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1500 });
   runner.assert(toText(r2) === "MS:after-reconnect", "切换后新 key 生效");
 
