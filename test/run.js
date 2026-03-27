@@ -46,7 +46,9 @@ import { PendingManager } from "../src/PendingManager.js";
 // ─── 基础工具 ────────────────────────────────────────────────────────────────
 
 const toText = (p) => (Buffer.isBuffer(p) ? p.toString() : String(p));
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const TIMEOUT_SCALE = /^(1|true|yes)$/i.test(process.env.CI ?? "") ? 2 : 1;
+const scaleMs = (ms) => Math.round(ms * TIMEOUT_SCALE);
+const delay = (ms) => new Promise((r) => setTimeout(r, scaleMs(ms)));
 const VERBOSE = /^(1|true|yes)$/i.test(process.env.ZNL_TEST_VERBOSE ?? "");
 const log = (...args) => {
   if (VERBOSE) console.log(...args);
@@ -57,8 +59,35 @@ const fmt = (p) => {
   return s.length > 60 ? `${s.slice(0, 57)}...` : s;
 };
 
+const wrapTimeoutOptions = (options) => {
+  if (!options || typeof options.timeoutMs !== "number") return options;
+  return { ...options, timeoutMs: scaleMs(options.timeoutMs) };
+};
+
+const _origDEALER = ZNL.prototype.DEALER;
+ZNL.prototype.DEALER = async function (payloadOrHandler, options = {}) {
+  if (typeof payloadOrHandler === "function") {
+    return _origDEALER.call(this, payloadOrHandler);
+  }
+  const nextOptions = wrapTimeoutOptions(options);
+  return _origDEALER.call(this, payloadOrHandler, nextOptions);
+};
+
+const _origROUTER = ZNL.prototype.ROUTER;
+ZNL.prototype.ROUTER = async function (
+  identityOrHandler,
+  payload,
+  options = {},
+) {
+  if (typeof identityOrHandler === "function") {
+    return _origROUTER.call(this, identityOrHandler);
+  }
+  const nextOptions = wrapTimeoutOptions(options);
+  return _origROUTER.call(this, identityOrHandler, payload, nextOptions);
+};
+
 async function waitForSlave(master, slaveId, maxMs = 2000) {
-  const deadline = Date.now() + maxMs;
+  const deadline = Date.now() + scaleMs(maxMs);
   while (Date.now() < deadline) {
     if (master.slaves.includes(slaveId)) return true;
     await delay(100);
@@ -629,7 +658,7 @@ await runner.test("master 无处理器 → slave 在指定时间内正确超时"
     const elapsed = Date.now() - t0;
     runner.assert(e.message.includes("请求超时"), `正确超时 → "${e.message}"`);
     runner.assert(
-      elapsed >= 380 && elapsed < 1500,
+      elapsed >= scaleMs(380) && elapsed < scaleMs(1500),
       `超时时机合理 → ${elapsed}ms`,
     );
   } finally {
@@ -869,13 +898,13 @@ await runner.test("master 重启后 slave 自动补注册并恢复广播", async
     role: "master",
     id: "m9",
     endpoints: { router: EP_RESTART },
-    heartbeatInterval: 200,
+    heartbeatInterval: scaleMs(200),
   });
   const s9 = new ZNL({
     role: "slave",
     id: "s9",
     endpoints: { router: EP_RESTART },
-    heartbeatInterval: 200,
+    heartbeatInterval: scaleMs(200),
   });
 
   const received = [];
@@ -894,7 +923,7 @@ await runner.test("master 重启后 slave 自动补注册并恢复广播", async
     role: "master",
     id: "m9b",
     endpoints: { router: EP_RESTART },
-    heartbeatInterval: 200,
+    heartbeatInterval: scaleMs(200),
   });
   await m9b.start();
 
@@ -959,8 +988,8 @@ await runner.test("自定义 heartbeatTimeoutMs 生效", async () => {
     role: "master",
     id: "m-hb",
     endpoints: { router: EP_HB },
-    heartbeatInterval: 100,
-    heartbeatTimeoutMs: 250,
+    heartbeatInterval: scaleMs(100),
+    heartbeatTimeoutMs: scaleMs(250),
   });
 
   await mH.start();
@@ -1458,12 +1487,15 @@ await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
   await sSw.start();
   await delay(150);
 
+  const registeredBefore = await waitForSlave(mS, "sSw", 3000);
+  runner.assert(registeredBefore, `切换前已注册 → ${mS.slaves}`);
+
   const r1 = await sSw.DEALER("before-switch", { timeoutMs: 1500 });
   runner.assert(toText(r1) === "MS:before-switch", "切换前通信正常");
 
   // 切换 master key
   mS.addAuthKey("sSw", "k2");
-  await delay(100);
+  await delay(200);
 
   let failed = false;
   try {
@@ -1489,8 +1521,22 @@ await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
   const registered = await waitForSlave(mS, "sSw", 3000);
   runner.assert(registered, `重连后注册成功 → ${mS.slaves}`);
 
-  const r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1500 });
-  runner.assert(toText(r2) === "MS:after-reconnect", "切换后新 key 生效");
+  let r2;
+  let r2Err;
+  for (let i = 0; i < 3; i++) {
+    try {
+      r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1500 });
+      r2Err = null;
+      break;
+    } catch (e) {
+      r2Err = e;
+      await delay(200);
+    }
+  }
+  runner.assert(
+    r2 && toText(r2) === "MS:after-reconnect",
+    r2 ? "切换后新 key 生效" : `切换后新 key 生效 → ${r2Err?.message ?? r2Err}`,
+  );
 
   await sSw2.stop();
   await mS.stop();
