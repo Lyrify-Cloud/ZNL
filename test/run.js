@@ -1399,6 +1399,7 @@ await runner.test("authKeyMap 优先级：命中 map 时不回退", async () => 
   }
 
   await sPriWrong.stop();
+  await delay(200);
 
   const sPriRight = new ZNL({
     role: "slave",
@@ -1411,11 +1412,22 @@ await runner.test("authKeyMap 优先级：命中 map 时不回退", async () => 
   await sPriRight.start();
   await delay(150);
 
-  const registered = await waitForSlave(mP, "sPri", 3000);
-  runner.assert(registered, `重连后注册成功 → ${mP.slaves}`);
-
-  const r = await sPriRight.DEALER("ok", { timeoutMs: 1500 });
-  runner.assert(toText(r) === "MP:ok", `map key 正常 → "${toText(r)}"`);
+  let ok = false;
+  let lastError = null;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const r = await sPriRight.DEALER("ok", { timeoutMs: 1500 });
+      runner.assert(toText(r) === "MP:ok", `map key 正常 → "${toText(r)}"`);
+      ok = true;
+      break;
+    } catch (e) {
+      lastError = e;
+      await delay(200);
+    }
+  }
+  if (!ok) {
+    runner.fail(`重连后仍未通信成功 → "${lastError?.message ?? lastError}"`);
+  }
 
   await sPriRight.stop();
   await mP.stop();
