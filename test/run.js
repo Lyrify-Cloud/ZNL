@@ -1,24 +1,49 @@
 /**
- * ZNL 集成测试
+ * ZNL 集成测试（增强版）
  *
- * 在同一进程内启动 Master / Slave 节点，完整验证库的核心功能：
- *  1. slave → master 基础请求
- *  2. master → slave 主动发送
- *  3. Buffer payload
- *  4. 并发 100 条请求
- *  5. 认证失败：错误 authKey 被 master 丢弃并触发 auth_failed 事件
- *  6. 请求超时：master 无处理器时 slave 正确超时
- *  7. stop() 取消所有 in-flight pending 请求
- *  8. PUB/SUB：topic 过滤、多 slave 广播、上下线事件、unsubscribe
- *  9. 心跳：slave 崩溃后 master 自动检测并移除
- * 10. encrypted 安全模式：透明加解密（RPC/PUB）与错误密钥拦截
+ * 覆盖项一览：
+ *  1) 构造参数校验：role / id / encrypted + authKey|authKeyMap
+ *  2) 基础双向通信：slave→master / master→slave / Buffer payload
+ *  3) 并发请求：100 条并发一致性校验
+ *  4) 载荷边界：Uint8Array、多帧 payload、非法 payload
+ *  5) API 行为：start/stop 幂等、stop→start 恢复、未 start 抛错
+ *  6) 并发上限：maxPending 达到上限拒绝新请求
+ *  7) 认证失败：错误 authKey / 错误 master key
+ *  8) 超时控制：无处理器时超时 & 超时时机
+ *  9) stop() 取消 pending：in-flight 立即 reject
+ * 10) PUB/SUB：订阅过滤、多 slave 广播、connected/disconnected、unsubscribe
+ * 11) 心跳：禁用心跳不移除、自定义 heartbeatTimeoutMs 生效
+ * 12) 加密：RPC + PUB 正常（透明加解密）
+ * 13) 加密：publish digest mismatch 触发 auth_failed
+ * 14) 安全：防重放（同 nonce+requestId）拒绝
+ * 15) 安全：时间漂移超限拒绝
+ * 16) authKeyMap：命中优先级不回退
+ * 17) authKeyMap：更新在线 key 立即切换
+ * 18) authKeyMap：未命中回退到 authKey
+ * 19) authKeyMap：动态 add/remove 立即生效
+ * 20) SendQueue 顺序：master→slave 顺序保持
+ * 21) PendingManager：key 含 identity 避免碰撞
+ * 22) 输出结构：分组、统一格式、汇总统计
  */
 
 import * as zmq from "zeromq";
 import { ZNL } from "../index.js";
-import { CONTROL_PREFIX, CONTROL_REGISTER } from "../src/constants.js";
+import {
+  CONTROL_PREFIX,
+  CONTROL_REGISTER,
+  SECURITY_ENVELOPE_VERSION,
+} from "../src/constants.js";
+import { buildRequestFrames } from "../src/protocol.js";
+import {
+  deriveKeys,
+  digestFrames,
+  encodeAuthProofToken,
+  encryptFrames,
+  toFrameBuffers,
+} from "../src/security.js";
+import { PendingManager } from "../src/PendingManager.js";
 
-// ─── 工具函数 ─────────────────────────────────────────────────────────────────
+// ─── 基础工具 ────────────────────────────────────────────────────────────────
 
 const toText = (p) => (Buffer.isBuffer(p) ? p.toString() : String(p));
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,74 +52,73 @@ const log = (...args) => {
   if (VERBOSE) console.log(...args);
 };
 
-let passed = 0;
-let failed = 0;
-let testIndex = 0;
-
-/**
- * 将 payload 格式化为短字符串显示（超过 60 字符时截断）
- * @param {Buffer|Array|string} p
- * @returns {string}
- */
 const fmt = (p) => {
   const s = Array.isArray(p) ? p.map(toText).join(" | ") : toText(p);
   return s.length > 60 ? `${s.slice(0, 57)}...` : s;
 };
 
-/** 单项断言，自动计入统计 */
-function assert(condition, label) {
-  if (condition) {
+class TestRunner {
+  constructor() {
+    this.passed = 0;
+    this.failed = 0;
+    this.index = 0;
+  }
+
+  banner(title) {
+    console.log("=".repeat(64));
+    console.log(`  ${title}`);
+    console.log("=".repeat(64));
+    console.log(`  verbose=${VERBOSE ? "on" : "off"}`);
+  }
+
+  section(title) {
+    console.log(`\n【${title}】`);
+  }
+
+  pass(label) {
     console.log(`    ✓ ${label}`);
-    passed++;
-  } else {
+    this.passed++;
+  }
+
+  fail(label) {
     console.error(`    ✗ ${label}`);
-    failed++;
+    this.failed++;
+  }
+
+  assert(cond, label) {
+    cond ? this.pass(label) : this.fail(label);
+  }
+
+  async test(label, fn) {
+    this.index++;
+    const idx = String(this.index).padStart(2, "0");
+    console.log(`\n  ▶ [${idx}] ${label}`);
+    try {
+      await fn();
+    } catch (e) {
+      this.fail(`未预期异常：${e?.message ?? e}`);
+    }
+  }
+
+  summary() {
+    console.log("\n" + "=".repeat(64));
+    console.log(`  通过: ${this.passed}   失败: ${this.failed}`);
+    console.log("=".repeat(64));
+    if (this.failed > 0) {
+      process.exit(1);
+    } else {
+      console.log("\n  ✓ 全部测试通过\n");
+      process.exit(0);
+    }
   }
 }
 
-/**
- * 包裹一个测试用例，捕获意外异常并统一格式化输出
- * @param {string} label
- * @param {() => Promise<void>} fn
- */
-async function test(label, fn) {
-  testIndex++;
-  const index = String(testIndex).padStart(2, "0");
-  console.log(`\n  ▶ [${index}] ${label}`);
-  try {
-    await fn();
-  } catch (e) {
-    console.error(`    ✗ 未预期的异常：${e.message}`);
-    failed++;
-  }
-}
+const runner = new TestRunner();
 
-function section(title) {
-  console.log(`\n【${title}】`);
-}
+// ─── 收发日志 ────────────────────────────────────────────────────────────────
 
-// ─── 收发日志 ─────────────────────────────────────────────────────────────────
-
-/**
- * 并发测试期间设为 true，屏蔽单条 REQ/RES 日志避免刷屏
- * 并发结束后恢复为 false
- */
 let logSilent = false;
 
-/**
- * 为节点挂载收发日志监听器
- *
- * 监听两个事件（均在「接收方」触发）：
- *  - request  ：本节点收到对端发来的请求（认证通过后）
- *  - response ：本节点收到对端返回的响应
- *
- * 输出格式：
- *  [LABEL] ◀ REQ  from=<identity>  "<payload>"
- *  [LABEL] ◀ RES  from=<identity>  "<payload>"
- *
- * @param {ZNL} node
- * @param {string} label - 控制台显示名称（建议固定宽度方便对齐）
- */
 function attachLogger(node, label) {
   node.on("request", ({ identityText, payload }) => {
     if (logSilent) return;
@@ -109,62 +133,107 @@ function attachLogger(node, label) {
   });
 }
 
-// ─── 测试开始 ─────────────────────────────────────────────────────────────────
+// ─── 低层构造辅助（用于安全/重放测试）────────────────────────────────────────
 
-console.log("=".repeat(56));
-console.log("  ZNL 集成测试");
-console.log("=".repeat(56));
-console.log(`  verbose=${VERBOSE ? "on" : "off"}`);
+function buildEncryptedRequestFrames({
+  authKey,
+  nodeId,
+  requestId,
+  payload,
+  nonce,
+  timestamp,
+}) {
+  const { signKey, encryptKey } = deriveKeys(authKey);
+  const rawFrames = toFrameBuffers(payload);
 
-section("构造参数校验");
+  const aad = Buffer.from(
+    `znl-aad-v1|request|${String(nodeId)}|${String(requestId ?? "")}`,
+    "utf8",
+  );
+  const { iv, ciphertext, tag } = encryptFrames(encryptKey, rawFrames, aad);
 
-await test("role 非法应抛错", async () => {
+  const payloadFrames = [
+    Buffer.from(SECURITY_ENVELOPE_VERSION),
+    iv,
+    tag,
+    ciphertext,
+  ];
+
+  const envelope = {
+    kind: "request",
+    nodeId: String(nodeId),
+    requestId: String(requestId ?? ""),
+    timestamp: Number(timestamp),
+    nonce: String(nonce),
+    payloadDigest: digestFrames(payloadFrames),
+  };
+
+  const proof = encodeAuthProofToken(signKey, envelope);
+  const frames = buildRequestFrames(requestId, payloadFrames, proof);
+  return { frames, payloadFrames };
+}
+
+// ─── 开始 ─────────────────────────────────────────────────────────────────────
+
+runner.banner("ZNL 集成测试（增强版）");
+
+// ══════════════════════════════════════════════════════════
+//  构造参数校验
+// ══════════════════════════════════════════════════════════
+
+runner.section("构造参数校验");
+
+await runner.test("role 非法应抛错", async () => {
   let threw = false;
   try {
     new ZNL({ role: "bad-role", id: "x" });
   } catch (e) {
     threw = true;
-    assert(
+    runner.assert(
       String(e?.message ?? e).includes("role"),
       `错误信息包含 role → "${e?.message ?? e}"`,
     );
   }
-  if (!threw) assert(false, "未抛错（role 非法）");
+  if (!threw) runner.fail("未抛错（role 非法）");
 });
 
-await test("id 缺失应抛错", async () => {
+await runner.test("id 缺失应抛错", async () => {
   let threw = false;
   try {
     new ZNL({ role: "master" });
   } catch (e) {
     threw = true;
-    assert(
+    runner.assert(
       String(e?.message ?? e).includes("id"),
       `错误信息包含 id → "${e?.message ?? e}"`,
     );
   }
-  if (!threw) assert(false, "未抛错（id 缺失）");
+  if (!threw) runner.fail("未抛错（id 缺失）");
 });
 
-await test("encrypted=true 但未提供 authKey 应抛错", async () => {
-  let threw = false;
-  try {
-    new ZNL({ role: "master", id: "m-enc", encrypted: true });
-  } catch (e) {
-    threw = true;
-    assert(
-      String(e?.message ?? e).includes("authKey"),
-      `错误信息包含 authKey → "${e?.message ?? e}"`,
-    );
-  }
-  if (!threw) assert(false, "未抛错（encrypted=true 缺少 authKey）");
-});
+await runner.test(
+  "encrypted=true 但未提供 authKey/authKeyMap 应抛错",
+  async () => {
+    let threw = false;
+    try {
+      new ZNL({ role: "master", id: "m-enc", encrypted: true });
+    } catch (e) {
+      threw = true;
+      const msg = String(e?.message ?? e);
+      runner.assert(
+        msg.includes("authKey") || msg.includes("authKeyMap"),
+        `错误信息包含 authKey/authKeyMap → "${e?.message ?? e}"`,
+      );
+    }
+    if (!threw) runner.fail("未抛错（encrypted=true 缺少 authKey/authKeyMap）");
+  },
+);
 
 // ══════════════════════════════════════════════════════════
-//  测试组 1：基础双向通信 & 并发
+//  基础双向通信 & 并发
 // ══════════════════════════════════════════════════════════
 
-section("基础双向通信 & 并发");
+runner.section("基础双向通信 & 并发");
 
 const EP1 = "tcp://127.0.0.1:16003";
 
@@ -181,35 +250,35 @@ const slave = new ZNL({
   maxPending: 200,
 });
 
-// 双向自动回复处理器：用前缀区分响应来源
 master.ROUTER(async ({ payload }) => `M:${toText(payload)}`);
 slave.DEALER(async ({ payload }) => `S:${toText(payload)}`);
 
-// 挂载收发日志（在 start 之前注册，确保不遗漏任何消息）
 attachLogger(master, "MASTER");
 attachLogger(slave, "SLAVE ");
 
 await master.start();
 await slave.start();
-await delay(200); // 等待 ZMQ 连接握手完成
+await delay(200);
 
-await test("slave → master：基础请求", async () => {
+await runner.test("slave → master：基础请求", async () => {
   const r = await slave.DEALER("hello", { timeoutMs: 3000 });
-  assert(toText(r) === "M:hello", `响应内容匹配 → "${toText(r)}"`);
+  runner.assert(toText(r) === "M:hello", `响应内容匹配 → "${toText(r)}"`);
 });
 
-await test("master → slave：主动发送", async () => {
+await runner.test("master → slave：主动发送", async () => {
   const r = await master.ROUTER("test-slave", "ping", { timeoutMs: 3000 });
-  assert(toText(r) === "S:ping", `响应内容匹配 → "${toText(r)}"`);
+  runner.assert(toText(r) === "S:ping", `响应内容匹配 → "${toText(r)}"`);
 });
 
-await test("Buffer payload", async () => {
+await runner.test("Buffer payload", async () => {
   const r = await slave.DEALER(Buffer.from("bin-data"), { timeoutMs: 3000 });
-  assert(toText(r) === "M:bin-data", `Buffer payload 正常 → "${toText(r)}"`);
+  runner.assert(
+    toText(r) === "M:bin-data",
+    `Buffer payload 正常 → "${toText(r)}"`,
+  );
 });
 
-await test("并发 100 条请求（全部内容一致性校验）", async () => {
-  // 并发量大时静默单条 REQ/RES 日志，改为只显示汇总行
+await runner.test("并发 100 条请求（全部内容一致性校验）", async () => {
   logSilent = true;
   log("    [并发] 正在发送 100 条请求...");
 
@@ -222,19 +291,23 @@ await test("并发 100 条请求（全部内容一致性校验）", async () => 
   log(`    [并发] 全部完成：发出 100 条 / 收到 ${results.length} 条`);
 
   const allOk = results.every((r, i) => toText(r) === `M:item-${i}`);
-  assert(allOk, "100 条并发响应内容全部匹配，无乱序");
+  runner.assert(allOk, "100 条并发响应内容全部匹配，无乱序");
 });
 
-section("载荷与 API 边界");
+// ══════════════════════════════════════════════════════════
+//  载荷与 API 边界
+// ══════════════════════════════════════════════════════════
 
-await test("Uint8Array payload", async () => {
+runner.section("载荷与 API 边界");
+
+await runner.test("Uint8Array payload", async () => {
   const r = await slave.DEALER(new Uint8Array([65, 66, 67]), {
     timeoutMs: 3000,
   });
-  assert(toText(r) === "M:ABC", `Uint8Array 正常 → "${toText(r)}"`);
+  runner.assert(toText(r) === "M:ABC", `Uint8Array 正常 → "${toText(r)}"`);
 });
 
-await test("多帧 payload 保持顺序与内容", async () => {
+await runner.test("多帧 payload 保持顺序与内容", async () => {
   const EP_PAYLOAD = "tcp://127.0.0.1:16015";
   const mP = new ZNL({
     role: "master",
@@ -256,29 +329,32 @@ await test("多帧 payload 保持顺序与内容", async () => {
   const frames = ["a", Buffer.from("b"), new Uint8Array([99])];
   const rep = await sP.DEALER(frames, { timeoutMs: 3000 });
 
-  assert(Array.isArray(rep), "多帧响应类型为数组");
+  runner.assert(Array.isArray(rep), "多帧响应类型为数组");
   const texts = rep.map(toText);
-  assert(texts.join("|") === "a|b|c", `多帧内容匹配 → "${texts.join("|")}"`);
+  runner.assert(
+    texts.join("|") === "a|b|c",
+    `多帧内容匹配 → "${texts.join("|")}"`,
+  );
 
   await sP.stop();
   await mP.stop();
 });
 
-await test("非法 payload 类型应抛错", async () => {
+await runner.test("非法 payload 类型应抛错", async () => {
   let threw = false;
   try {
     await slave.DEALER({ bad: true }, { timeoutMs: 1000 });
   } catch (e) {
     threw = true;
-    assert(
+    runner.assert(
       String(e?.message ?? e).includes("payload"),
       `错误信息包含 payload → "${e?.message ?? e}"`,
     );
   }
-  if (!threw) assert(false, "未抛错（非法 payload）");
+  if (!threw) runner.fail("未抛错（非法 payload）");
 });
 
-await test("start()/stop() 可重复调用且无异常", async () => {
+await runner.test("start()/stop() 可重复调用且无异常", async () => {
   const EP_IDEMP = "tcp://127.0.0.1:16016";
   const mI = new ZNL({
     role: "master",
@@ -301,10 +377,46 @@ await test("start()/stop() 可重复调用且无异常", async () => {
   await mI.stop();
   await mI.stop();
 
-  assert(true, "start/stop 重复调用正常");
+  runner.assert(true, "start/stop 重复调用正常");
 });
 
-await test("未 start 时调用 DEALER/ROUTER 应抛错", async () => {
+await runner.test("stop 后重新 start 可恢复通信", async () => {
+  const EP_RS = "tcp://127.0.0.1:16023";
+  const mR = new ZNL({
+    role: "master",
+    id: "m-r",
+    endpoints: { router: EP_RS },
+  });
+  const sR = new ZNL({
+    role: "slave",
+    id: "s-r",
+    endpoints: { router: EP_RS },
+  });
+
+  mR.ROUTER(async ({ payload }) => `MR:${toText(payload)}`);
+
+  await mR.start();
+  await sR.start();
+  await delay(100);
+
+  const r1 = await sR.DEALER("first", { timeoutMs: 2000 });
+  runner.assert(toText(r1) === "MR:first", `首次通信正常 → "${toText(r1)}"`);
+
+  await sR.stop();
+  await mR.stop();
+
+  await mR.start();
+  await sR.start();
+  await delay(150);
+
+  const r2 = await sR.DEALER("second", { timeoutMs: 2000 });
+  runner.assert(toText(r2) === "MR:second", `重启后通信正常 → "${toText(r2)}"`);
+
+  await sR.stop();
+  await mR.stop();
+});
+
+await runner.test("未 start 时调用 DEALER/ROUTER 应抛错", async () => {
   const EP_PRE = "tcp://127.0.0.1:16017";
   const mPre = new ZNL({
     role: "master",
@@ -332,17 +444,17 @@ await test("未 start 时调用 DEALER/ROUTER 应抛错", async () => {
     routerErr = e;
   }
 
-  assert(
+  runner.assert(
     String(dealerErr?.message ?? dealerErr).includes("socket"),
     `DEALER 未 start 抛错 → "${dealerErr?.message ?? dealerErr}"`,
   );
-  assert(
+  runner.assert(
     String(routerErr?.message ?? routerErr).includes("socket"),
     `ROUTER 未 start 抛错 → "${routerErr?.message ?? routerErr}"`,
   );
 });
 
-await test("maxPending 达到上限时拒绝新请求", async () => {
+await runner.test("maxPending 达到上限时拒绝新请求", async () => {
   const EP_MP = "tcp://127.0.0.1:16018";
   const mMp = new ZNL({
     role: "master",
@@ -374,7 +486,7 @@ await test("maxPending 达到上限时拒绝新请求", async () => {
     err = e;
   }
 
-  assert(
+  runner.assert(
     String(err?.message ?? err).includes("并发请求数已达上限"),
     `maxPending 拒绝新请求 → "${err?.message ?? err}"`,
   );
@@ -385,115 +497,114 @@ await test("maxPending 达到上限时拒绝新请求", async () => {
 });
 
 // ══════════════════════════════════════════════════════════
-//  测试组 2：认证失败
+//  认证失败检测
 // ══════════════════════════════════════════════════════════
 
-section("认证失败检测");
+runner.section("认证失败检测");
 
-await test("错误 authKey（encrypted=true）→ master 丢弃请求并触发 auth_failed 事件", async () => {
-  const EP_AUTH = "tcp://127.0.0.1:16014";
-  const mAuth = new ZNL({
-    role: "master",
-    id: "m-auth",
-    endpoints: { router: EP_AUTH },
-    authKey: "right-key",
-    encrypted: true,
-  });
-  const badSlave = new ZNL({
-    role: "slave",
-    id: "bad-slave",
-    endpoints: { router: EP_AUTH },
-    authKey: "wrong-key", // 故意填错，触发认证失败
-    encrypted: true,
-  });
+await runner.test(
+  "错误 authKey（encrypted=true）→ master 丢弃请求并触发 auth_failed 事件",
+  async () => {
+    const EP_AUTH = "tcp://127.0.0.1:16014";
+    const mAuth = new ZNL({
+      role: "master",
+      id: "m-auth",
+      endpoints: { router: EP_AUTH },
+      authKey: "right-key",
+      encrypted: true,
+    });
+    const badSlave = new ZNL({
+      role: "slave",
+      id: "bad-slave",
+      endpoints: { router: EP_AUTH },
+      authKey: "wrong-key",
+      encrypted: true,
+    });
 
-  let authFailedFired = false;
+    let authFailedFired = false;
+    mAuth.once("auth_failed", ({ identityText, reason }) => {
+      authFailedFired = true;
+      log(
+        `    [MASTER] ✗ AUTH  from=${identityText}  reason="${reason ?? "<unknown>"}"`,
+      );
+    });
 
-  // 认证失败时手动打印详情（request 事件不会触发，因为在认证前已丢弃）
-  mAuth.once("auth_failed", ({ identityText, reason }) => {
-    authFailedFired = true;
-    log(
-      `    [MASTER] ✗ AUTH  from=${identityText}  reason="${reason ?? "<unknown>"}"`,
-    );
-  });
+    await mAuth.start();
+    await badSlave.start();
+    await delay(100);
 
-  await mAuth.start();
-  await badSlave.start();
-  await delay(100);
+    try {
+      await badSlave.DEALER("forbidden", { timeoutMs: 800 });
+      runner.fail("不应收到响应");
+    } catch (e) {
+      runner.assert(
+        e.message.includes("请求超时"),
+        `请求正确超时 → "${e.message}"`,
+      );
+      runner.assert(authFailedFired, "auth_failed 事件已触发");
+    } finally {
+      await badSlave.stop();
+      await mAuth.stop();
+    }
+  },
+);
 
-  try {
-    // master 会丢弃请求，badSlave 永远等不到回复，最终超时
-    await badSlave.DEALER("forbidden", { timeoutMs: 800 });
-    assert(false, "不应收到响应");
-  } catch (e) {
-    assert(e.message.includes("请求超时"), `请求正确超时 → "${e.message}"`);
-    assert(authFailedFired, "auth_failed 事件已触发");
-  } finally {
-    await badSlave.stop();
-    await mAuth.stop();
-  }
-});
+await runner.test(
+  "错误 master key（encrypted=true）→ slave 触发 auth_failed",
+  async () => {
+    const EP_AUTH2 = "tcp://127.0.0.1:16019";
+    const mWrong = new ZNL({
+      role: "master",
+      id: "m-wrong",
+      endpoints: { router: EP_AUTH2 },
+      authKey: "wrong-master-key",
+      encrypted: true,
+    });
+    const sRight = new ZNL({
+      role: "slave",
+      id: "s-right",
+      endpoints: { router: EP_AUTH2 },
+      authKey: "right-slave-key",
+      encrypted: true,
+    });
 
-await test("错误 master key（encrypted=true）→ slave 触发 auth_failed", async () => {
-  const EP_AUTH2 = "tcp://127.0.0.1:16019";
-  const mWrong = new ZNL({
-    role: "master",
-    id: "m-wrong",
-    endpoints: { router: EP_AUTH2 },
-    authKey: "wrong-master-key",
-    encrypted: true,
-  });
-  const sRight = new ZNL({
-    role: "slave",
-    id: "s-right",
-    endpoints: { router: EP_AUTH2 },
-    authKey: "right-slave-key",
-    encrypted: true,
-  });
+    let slaveAuthFailed = false;
+    sRight.on("auth_failed", ({ reason }) => {
+      slaveAuthFailed = true;
+      log(`    [SLAVE] ✗ AUTH  reason="${reason ?? "<unknown>"}"`);
+    });
 
-  let slaveAuthFailed = false;
-  sRight.on("auth_failed", ({ reason }) => {
-    slaveAuthFailed = true;
-    log(`    [SLAVE] ✗ AUTH  reason="${reason ?? "<unknown>"}"`);
-  });
+    await mWrong.start();
+    await sRight.start();
+    await delay(150);
 
-  await mWrong.start();
-  await sRight.start();
-  await delay(150);
-
-  try {
-    await mWrong.ROUTER("s-right", "ping", { timeoutMs: 800 });
-    assert(false, "错误 master key 不应收到响应");
-  } catch (e) {
-    assert(e.message.includes("请求超时"), `请求正确超时 → "${e.message}"`);
-    assert(slaveAuthFailed, "slave 侧 auth_failed 事件已触发");
-  } finally {
-    await sRight.stop();
-    await mWrong.stop();
-  }
-});
+    try {
+      await mWrong.ROUTER("s-right", "ping", { timeoutMs: 800 });
+      runner.fail("错误 master key 不应收到响应");
+    } catch (e) {
+      runner.assert(
+        e.message.includes("请求超时"),
+        `请求正确超时 → "${e.message}"`,
+      );
+      runner.assert(slaveAuthFailed, "slave 侧 auth_failed 事件已触发");
+    } finally {
+      await sRight.stop();
+      await mWrong.stop();
+    }
+  },
+);
 
 // ══════════════════════════════════════════════════════════
-//  测试组 3：超时控制
+//  超时控制
 // ══════════════════════════════════════════════════════════
 
-section("超时控制");
+runner.section("超时控制");
 
-await test("master 无处理器 → slave 在指定时间内正确超时", async () => {
+await runner.test("master 无处理器 → slave 在指定时间内正确超时", async () => {
   const EP2 = "tcp://127.0.0.1:16004";
-  // 这个 master 故意不注册 ROUTER 处理器，收到请求后不回复
-  const m2 = new ZNL({
-    role: "master",
-    id: "m2",
-    endpoints: { router: EP2 },
-  });
-  const s2 = new ZNL({
-    role: "slave",
-    id: "s2",
-    endpoints: { router: EP2 },
-  });
+  const m2 = new ZNL({ role: "master", id: "m2", endpoints: { router: EP2 } });
+  const s2 = new ZNL({ role: "slave", id: "s2", endpoints: { router: EP2 } });
 
-  // m2 日志可见「收到请求但没有回复」的过程，s2 无响应所以不会打印 RES
   attachLogger(m2, "M2    ");
   attachLogger(s2, "S2    ");
 
@@ -504,11 +615,14 @@ await test("master 无处理器 → slave 在指定时间内正确超时", async
   const t0 = Date.now();
   try {
     await s2.DEALER("no-reply", { timeoutMs: 400 });
-    assert(false, "不应收到响应");
+    runner.fail("不应收到响应");
   } catch (e) {
     const elapsed = Date.now() - t0;
-    assert(e.message.includes("请求超时"), `正确超时 → "${e.message}"`);
-    assert(elapsed >= 380 && elapsed < 1500, `超时时机合理 → ${elapsed}ms`);
+    runner.assert(e.message.includes("请求超时"), `正确超时 → "${e.message}"`);
+    runner.assert(
+      elapsed >= 380 && elapsed < 1500,
+      `超时时机合理 → ${elapsed}ms`,
+    );
   } finally {
     await s2.stop();
     await m2.stop();
@@ -516,29 +630,19 @@ await test("master 无处理器 → slave 在指定时间内正确超时", async
 });
 
 // ══════════════════════════════════════════════════════════
-//  测试组 4：stop() 取消所有 pending
+//  stop() 取消 pending
 // ══════════════════════════════════════════════════════════
 
-section("stop() 取消 pending");
+runner.section("stop() 取消 pending");
 
-await test("stop() 期间所有 in-flight 请求立即 reject", async () => {
+await runner.test("stop() 期间所有 in-flight 请求立即 reject", async () => {
   const EP3 = "tcp://127.0.0.1:16005";
-  const m3 = new ZNL({
-    role: "master",
-    id: "m3",
-    endpoints: { router: EP3 },
-  });
-  const s3 = new ZNL({
-    role: "slave",
-    id: "s3",
-    endpoints: { router: EP3 },
-  });
+  const m3 = new ZNL({ role: "master", id: "m3", endpoints: { router: EP3 } });
+  const s3 = new ZNL({ role: "slave", id: "s3", endpoints: { router: EP3 } });
 
-  // m3 日志可见「收到请求、处理中」；s3 在 stop 前不会收到 RES，所以只有 REQ 行
   attachLogger(m3, "M3    ");
   attachLogger(s3, "S3    ");
 
-  // master 处理器有 3 秒延迟，保证在 stop 之前不会回复
   m3.ROUTER(async () => {
     await delay(3000);
     return "late";
@@ -548,17 +652,16 @@ await test("stop() 期间所有 in-flight 请求立即 reject", async () => {
   await s3.start();
   await delay(100);
 
-  // 发出一个长时间请求（10 秒超时），让它挂在 pending 中
   const reqPromise = s3.DEALER("long-req", { timeoutMs: 10000 });
 
-  await delay(150); // 确保请求已成功发出并登记到 pending
-  await s3.stop(); // 主动停止 → 立即 reject 所有 pending
+  await delay(150);
+  await s3.stop();
 
   try {
     await reqPromise;
-    assert(false, "stop 后不应收到响应");
+    runner.fail("stop 后不应收到响应");
   } catch (e) {
-    assert(
+    runner.assert(
       e.message.includes("已停止") || e.message.includes("cancelled"),
       `stop 后正确 reject → "${e.message}"`,
     );
@@ -568,126 +671,164 @@ await test("stop() 期间所有 in-flight 请求立即 reject", async () => {
 });
 
 // ══════════════════════════════════════════════════════════
-//  测试组 5：PUB/SUB 广播
+//  PUB/SUB 广播
 // ══════════════════════════════════════════════════════════
 
-section("PUB/SUB 广播");
+runner.section("PUB/SUB 广播");
 
-await test("slave 只收到已订阅的 topic，未订阅的 topic 静默丢弃", async () => {
-  const EP4 = "tcp://127.0.0.1:16006";
-  const m4 = new ZNL({ role: "master", id: "m4", endpoints: { router: EP4 } });
-  const s4 = new ZNL({ role: "slave", id: "s4", endpoints: { router: EP4 } });
+await runner.test(
+  "slave 只收到已订阅的 topic，未订阅的 topic 静默丢弃",
+  async () => {
+    const EP4 = "tcp://127.0.0.1:16006";
+    const m4 = new ZNL({
+      role: "master",
+      id: "m4",
+      endpoints: { router: EP4 },
+    });
+    const s4 = new ZNL({ role: "slave", id: "s4", endpoints: { router: EP4 } });
 
-  const received = [];
+    const received = [];
 
-  // 只订阅 "news"，不订阅 "weather"
-  s4.subscribe("news", ({ topic, payload }) => {
-    received.push({ topic, text: toText(payload) });
-  });
+    s4.subscribe("news", ({ topic, payload }) => {
+      received.push({ topic, text: toText(payload) });
+    });
 
-  await m4.start();
-  await s4.start();
-  await delay(200); // 等待注册帧到达 master
+    await m4.start();
+    await s4.start();
+    await delay(200);
 
-  assert(m4.slaves.includes("s4"), `master.slaves 包含 s4 → ${m4.slaves}`);
+    runner.assert(
+      m4.slaves.includes("s4"),
+      `master.slaves 包含 s4 → ${m4.slaves}`,
+    );
 
-  m4.publish("news", "breaking news!");
-  m4.publish("weather", "sunny day"); // s4 未订阅，应静默丢弃
-  await delay(100);
+    m4.publish("news", "breaking news!");
+    m4.publish("weather", "sunny day");
+    await delay(100);
 
-  assert(
-    received.length === 1,
-    `只收到 1 条（news）→ 实际 ${received.length} 条`,
-  );
-  assert(
-    received[0]?.text === "breaking news!",
-    `内容匹配 → "${received[0]?.text}"`,
-  );
-  assert(received[0]?.topic === "news", `topic 匹配 → "${received[0]?.topic}"`);
+    runner.assert(
+      received.length === 1,
+      `只收到 1 条（news）→ 实际 ${received.length} 条`,
+    );
+    runner.assert(
+      received[0]?.text === "breaking news!",
+      `内容匹配 → "${received[0]?.text}"`,
+    );
+    runner.assert(
+      received[0]?.topic === "news",
+      `topic 匹配 → "${received[0]?.topic}"`,
+    );
 
-  await s4.stop();
-  await m4.stop();
-});
+    await s4.stop();
+    await m4.stop();
+  },
+);
 
-await test("多 slave 广播：每个 slave 都能收到，slave.on('publish') 兜底监听", async () => {
-  const EP5 = "tcp://127.0.0.1:16007";
-  const m5 = new ZNL({ role: "master", id: "m5", endpoints: { router: EP5 } });
-  const s5a = new ZNL({ role: "slave", id: "s5a", endpoints: { router: EP5 } });
-  const s5b = new ZNL({ role: "slave", id: "s5b", endpoints: { router: EP5 } });
+await runner.test(
+  "多 slave 广播：每个 slave 都能收到，slave.on('publish') 兜底监听",
+  async () => {
+    const EP5 = "tcp://127.0.0.1:16007";
+    const m5 = new ZNL({
+      role: "master",
+      id: "m5",
+      endpoints: { router: EP5 },
+    });
+    const s5a = new ZNL({
+      role: "slave",
+      id: "s5a",
+      endpoints: { router: EP5 },
+    });
+    const s5b = new ZNL({
+      role: "slave",
+      id: "s5b",
+      endpoints: { router: EP5 },
+    });
 
-  const s5aLog = [];
-  const s5bLog = [];
+    const s5aLog = [];
+    const s5bLog = [];
 
-  // s5a 用精确订阅
-  s5a.subscribe("chat", ({ payload }) => s5aLog.push(toText(payload)));
+    s5a.subscribe("chat", ({ payload }) => s5aLog.push(toText(payload)));
+    s5b.on("publish", ({ topic, payload }) =>
+      s5bLog.push(`${topic}:${toText(payload)}`),
+    );
 
-  // s5b 用兜底监听（捕获所有 topic）
-  s5b.on("publish", ({ topic, payload }) =>
-    s5bLog.push(`${topic}:${toText(payload)}`),
-  );
+    await m5.start();
+    await s5a.start();
+    await s5b.start();
+    await delay(200);
 
-  await m5.start();
-  await s5a.start();
-  await s5b.start();
-  await delay(200);
+    runner.assert(m5.slaves.length === 2, `2 个 slave 已注册 → ${m5.slaves}`);
 
-  assert(m5.slaves.length === 2, `2 个 slave 已注册 → ${m5.slaves}`);
+    m5.publish("chat", "hello everyone");
+    m5.publish("system", "server ok");
+    await delay(100);
 
-  m5.publish("chat", "hello everyone");
-  m5.publish("system", "server ok");
-  await delay(100);
+    runner.assert(s5aLog.length === 1, `s5a 收到 1 条 → 实际 ${s5aLog.length}`);
+    runner.assert(
+      s5aLog[0] === "hello everyone",
+      `s5a 内容匹配 → "${s5aLog[0]}"`,
+    );
 
-  // s5a 只订阅了 chat
-  assert(s5aLog.length === 1, `s5a 收到 1 条 → 实际 ${s5aLog.length}`);
-  assert(s5aLog[0] === "hello everyone", `s5a 内容匹配 → "${s5aLog[0]}"`);
+    runner.assert(s5bLog.length === 2, `s5b 收到 2 条 → 实际 ${s5bLog.length}`);
+    runner.assert(s5bLog.includes("chat:hello everyone"), "s5b 包含 chat 消息");
+    runner.assert(s5bLog.includes("system:server ok"), "s5b 包含 system 消息");
 
-  // s5b 兜底监听收到全部 2 条
-  assert(s5bLog.length === 2, `s5b 收到 2 条 → 实际 ${s5bLog.length}`);
-  assert(s5bLog.includes("chat:hello everyone"), `s5b 包含 chat 消息`);
-  assert(s5bLog.includes("system:server ok"), `s5b 包含 system 消息`);
+    await s5a.stop();
+    await s5b.stop();
+    await m5.stop();
+  },
+);
 
-  await s5a.stop();
-  await s5b.stop();
-  await m5.stop();
-});
+await runner.test(
+  "slave_connected / slave_disconnected 事件在 start/stop 时正确触发",
+  async () => {
+    const EP6 = "tcp://127.0.0.1:16008";
+    const m6 = new ZNL({
+      role: "master",
+      id: "m6",
+      endpoints: { router: EP6 },
+    });
+    const s6 = new ZNL({ role: "slave", id: "s6", endpoints: { router: EP6 } });
 
-await test("slave_connected / slave_disconnected 事件在 start/stop 时正确触发", async () => {
-  const EP6 = "tcp://127.0.0.1:16008";
-  const m6 = new ZNL({ role: "master", id: "m6", endpoints: { router: EP6 } });
-  const s6 = new ZNL({ role: "slave", id: "s6", endpoints: { router: EP6 } });
+    const connected = [];
+    const disconnected = [];
+    m6.on("slave_connected", (id) => connected.push(id));
+    m6.on("slave_disconnected", (id) => disconnected.push(id));
 
-  const connected = [];
-  const disconnected = [];
-  m6.on("slave_connected", (id) => connected.push(id));
-  m6.on("slave_disconnected", (id) => disconnected.push(id));
+    await m6.start();
+    await s6.start();
+    await delay(200);
 
-  await m6.start();
-  await s6.start();
-  await delay(200);
+    runner.assert(
+      connected.includes("s6"),
+      `slave_connected 事件触发 → ${connected}`,
+    );
+    runner.assert(m6.slaves.includes("s6"), `master.slaves 包含 s6`);
+    runner.assert(disconnected.length === 0, "尚未触发 slave_disconnected");
 
-  assert(connected.includes("s6"), `slave_connected 事件触发 → ${connected}`);
-  assert(m6.slaves.includes("s6"), `master.slaves 包含 s6`);
-  assert(disconnected.length === 0, `尚未触发 slave_disconnected`);
+    await s6.stop();
+    await delay(100);
 
-  await s6.stop();
-  await delay(100);
+    runner.assert(
+      disconnected.includes("s6"),
+      `slave_disconnected 事件触发 → ${disconnected}`,
+    );
+    runner.assert(
+      !m6.slaves.includes("s6"),
+      `master.slaves 已移除 s6 → ${m6.slaves}`,
+    );
 
-  assert(
-    disconnected.includes("s6"),
-    `slave_disconnected 事件触发 → ${disconnected}`,
-  );
-  assert(!m6.slaves.includes("s6"), `master.slaves 已移除 s6 → ${m6.slaves}`);
+    await m6.stop();
+  },
+);
 
-  await m6.stop();
-});
-
-await test("unsubscribe() 后不再收到该 topic 的消息", async () => {
+await runner.test("unsubscribe() 后不再收到该 topic 的消息", async () => {
   const EP7 = "tcp://127.0.0.1:16009";
   const m7 = new ZNL({ role: "master", id: "m7", endpoints: { router: EP7 } });
   const s7 = new ZNL({ role: "slave", id: "s7", endpoints: { router: EP7 } });
 
-  const log = [];
-  s7.subscribe("ping", ({ payload }) => log.push(toText(payload)));
+  const logList = [];
+  s7.subscribe("ping", ({ payload }) => logList.push(toText(payload)));
 
   await m7.start();
   await s7.start();
@@ -695,77 +836,36 @@ await test("unsubscribe() 后不再收到该 topic 的消息", async () => {
 
   m7.publish("ping", "first");
   await delay(100);
-  assert(log.length === 1, `订阅期间收到第 1 条 → ${log.length} 条`);
+  runner.assert(
+    logList.length === 1,
+    `订阅期间收到第 1 条 → ${logList.length} 条`,
+  );
 
-  // 取消订阅后再发
   s7.unsubscribe("ping");
   m7.publish("ping", "second");
   await delay(100);
-  assert(log.length === 1, `取消订阅后不再收到消息 → 仍是 ${log.length} 条`);
+  runner.assert(
+    logList.length === 1,
+    `取消订阅后不再收到消息 → 仍是 ${logList.length} 条`,
+  );
 
   await s7.stop();
   await m7.stop();
 });
 
-await test("slave 崩溃后（未发注销帧）master 在心跳超时内自动检测并移除", async () => {
-  const EP8 = "tcp://127.0.0.1:16010";
+await runner.test("master 重启后 slave 自动补注册并恢复广播", async () => {
+  const EP_RESTART = "tcp://127.0.0.1:16011";
 
-  // heartbeatInterval = 300ms → 超时阈值 = 900ms
-  const m8 = new ZNL({
-    role: "master",
-    id: "m8",
-    endpoints: { router: EP8 },
-    heartbeatInterval: 300,
-  });
-
-  await m8.start();
-
-  // 用裸 ZMQ DEALER 模拟"只发注册、不发心跳"的崩溃节点
-  // 真实崩溃场景中，进程直接退出，unregister 帧永远不会发送
-  const crashDealer = new zmq.Dealer({ routingId: "crash-slave" });
-  crashDealer.connect(EP8);
-  await crashDealer.send([CONTROL_PREFIX, CONTROL_REGISTER]);
-
-  await delay(200); // 等待注册帧到达 master
-
-  assert(
-    m8.slaves.includes("crash-slave"),
-    `crash-slave 已注册 → ${m8.slaves}`,
-  );
-
-  const disconnectedIds = [];
-  m8.on("slave_disconnected", (id) => disconnectedIds.push(id));
-
-  // 等待超过 3 个心跳周期（300ms × 3 = 900ms），再加扫描间隔缓冲
-  await delay(1400);
-
-  assert(
-    disconnectedIds.includes("crash-slave"),
-    `超时后 slave_disconnected 已触发 → ${disconnectedIds}`,
-  );
-  assert(
-    !m8.slaves.includes("crash-slave"),
-    `master.slaves 已移除 crash-slave → [${m8.slaves}]`,
-  );
-
-  crashDealer.close();
-  await m8.stop();
-});
-
-await test("master 重启后 slave 自动补注册并恢复广播", async () => {
-  const EP9 = "tcp://127.0.0.1:16011";
-
-  // 缩短心跳间隔，加速重连检测
   const m9 = new ZNL({
     role: "master",
     id: "m9",
-    endpoints: { router: EP9 },
+    endpoints: { router: EP_RESTART },
     heartbeatInterval: 200,
   });
   const s9 = new ZNL({
     role: "slave",
     id: "s9",
-    endpoints: { router: EP9 },
+    endpoints: { router: EP_RESTART },
     heartbeatInterval: 200,
   });
 
@@ -776,21 +876,19 @@ await test("master 重启后 slave 自动补注册并恢复广播", async () => 
   await s9.start();
   await delay(200);
 
-  assert(m9.slaves.includes("s9"), `首次注册成功 → ${m9.slaves}`);
+  runner.assert(m9.slaves.includes("s9"), `首次注册成功 → ${m9.slaves}`);
 
-  // 模拟 master 崩溃/重启
   await m9.stop();
   await delay(300);
 
   const m9b = new ZNL({
     role: "master",
     id: "m9b",
-    endpoints: { router: EP9 },
+    endpoints: { router: EP_RESTART },
     heartbeatInterval: 200,
   });
   await m9b.start();
 
-  // 等待 slave 通过心跳自动补注册
   let registered = false;
   for (let i = 0; i < 20; i++) {
     if (m9b.slaves.includes("s9")) {
@@ -799,12 +897,11 @@ await test("master 重启后 slave 自动补注册并恢复广播", async () => 
     }
     await delay(100);
   }
-  assert(registered, `重启后自动补注册成功 → ${m9b.slaves}`);
+  runner.assert(registered, `重启后自动补注册成功 → ${m9b.slaves}`);
 
-  // 广播应可恢复
   m9b.publish("news", "after-restart");
   await delay(150);
-  assert(
+  runner.assert(
     received.includes("after-restart"),
     `重启后广播可达 → ${received.join(",")}`,
   );
@@ -814,246 +911,731 @@ await test("master 重启后 slave 自动补注册并恢复广播", async () => 
 });
 
 // ══════════════════════════════════════════════════════════
-//  测试组 6：auth / encrypted 安全集成
+//  心跳
 // ══════════════════════════════════════════════════════════
 
-section("encrypted 安全集成");
+runner.section("心跳");
 
-await test("encrypted 模式：RPC + PUB/SUB 正常（透明加解密）", async () => {
-  const EP10 = "tcp://127.0.0.1:16012";
-  const KEY = "sec-encrypted-key-001";
-
-  const m10 = new ZNL({
+await runner.test("心跳禁用（heartbeatInterval=0）不移除节点", async () => {
+  const EP_HB0 = "tcp://127.0.0.1:16028";
+  const mH0 = new ZNL({
     role: "master",
-    id: "m10",
-    endpoints: { router: EP10 },
-    authKey: KEY,
-    encrypted: true,
-  });
-  const s10 = new ZNL({
-    role: "slave",
-    id: "s10",
-    endpoints: { router: EP10 },
-    authKey: KEY,
-    encrypted: true,
+    id: "m-hb0",
+    endpoints: { router: EP_HB0 },
+    heartbeatInterval: 0,
   });
 
-  const pubLog = [];
-  s10.subscribe("news", ({ payload }) => pubLog.push(toText(payload)));
+  await mH0.start();
 
-  m10.ROUTER(async ({ payload }) => `ENC-M:${toText(payload)}`);
-  s10.DEALER(async ({ payload }) => `ENC-S:${toText(payload)}`);
+  const dealer = new zmq.Dealer({ routingId: "hb0-slave" });
+  dealer.connect(EP_HB0);
+  await dealer.send([CONTROL_PREFIX, CONTROL_REGISTER]);
 
-  await m10.start();
-  await s10.start();
-  await delay(250);
-
-  const r1 = await s10.DEALER("hello-encrypted", { timeoutMs: 3000 });
-  assert(
-    toText(r1) === "ENC-M:hello-encrypted",
-    `encrypted slave→master 正常 → "${toText(r1)}"`,
+  await delay(200);
+  runner.assert(
+    mH0.slaves.includes("hb0-slave"),
+    `hb0-slave 已注册 → ${mH0.slaves}`,
   );
 
-  const r2 = await m10.ROUTER("s10", "ping-encrypted", { timeoutMs: 3000 });
-  assert(
-    toText(r2) === "ENC-S:ping-encrypted",
-    `encrypted master→slave 正常 → "${toText(r2)}"`,
-  );
+  await delay(1200);
+  runner.assert(mH0.slaves.includes("hb0-slave"), "心跳禁用后未被移除");
 
-  m10.publish("news", "encrypted-news-1");
-  await delay(120);
-  assert(pubLog.length === 1, `encrypted 广播收到 1 条 → ${pubLog.length}`);
-  assert(
-    pubLog[0] === "encrypted-news-1",
-    `encrypted 广播内容匹配 → "${pubLog[0]}"`,
-  );
-
-  await s10.stop();
-  await m10.stop();
+  dealer.close();
+  await mH0.stop();
 });
 
-await test("encrypted 模式：master 重启后 slave 自动补注册并恢复广播", async () => {
-  const EP14 = "tcp://127.0.0.1:16022";
-  const KEY = "sec-encrypted-key-014";
-
-  const m14 = new ZNL({
+await runner.test("自定义 heartbeatTimeoutMs 生效", async () => {
+  const EP_HB = "tcp://127.0.0.1:16029";
+  const mH = new ZNL({
     role: "master",
-    id: "m14",
-    endpoints: { router: EP14 },
-    authKey: KEY,
-    encrypted: true,
-    heartbeatInterval: 200,
-  });
-  const s14 = new ZNL({
-    role: "slave",
-    id: "s14",
-    endpoints: { router: EP14 },
-    authKey: KEY,
-    encrypted: true,
-    heartbeatInterval: 200,
+    id: "m-hb",
+    endpoints: { router: EP_HB },
+    heartbeatInterval: 100,
+    heartbeatTimeoutMs: 250,
   });
 
-  const received = [];
-  s14.subscribe("news", ({ payload }) => received.push(toText(payload)));
+  await mH.start();
 
-  await m14.start();
-  await s14.start();
-  await delay(250);
+  const dealer = new zmq.Dealer({ routingId: "hb-slave" });
+  dealer.connect(EP_HB);
+  await dealer.send([CONTROL_PREFIX, CONTROL_REGISTER]);
 
-  assert(m14.slaves.includes("s14"), `首次注册成功 → ${m14.slaves}`);
-
-  // 模拟 master 崩溃/重启
-  await m14.stop();
-  await delay(300);
-
-  const m14b = new ZNL({
-    role: "master",
-    id: "m14b",
-    endpoints: { router: EP14 },
-    authKey: KEY,
-    encrypted: true,
-    heartbeatInterval: 200,
-  });
-  await m14b.start();
-
-  // 等待 slave 通过心跳自动补注册（需认证通过）
-  let registered = false;
-  for (let i = 0; i < 20; i++) {
-    if (m14b.slaves.includes("s14")) {
-      registered = true;
-      break;
-    }
-    await delay(100);
-  }
-  assert(registered, `重启后自动补注册成功 → ${m14b.slaves}`);
-
-  // 广播应可恢复
-  m14b.publish("news", "after-restart-encrypted");
   await delay(150);
-  assert(
-    received.includes("after-restart-encrypted"),
-    `重启后广播可达 → ${received.join(",")}`,
+  runner.assert(
+    mH.slaves.includes("hb-slave"),
+    `hb-slave 已注册 → ${mH.slaves}`,
   );
 
-  await s14.stop();
-  await m14b.stop();
+  await delay(400);
+  runner.assert(
+    !mH.slaves.includes("hb-slave"),
+    `超过 timeoutMs 后被移除 → ${mH.slaves}`,
+  );
+
+  dealer.close();
+  await mH.stop();
 });
 
-await test("encrypted 模式：关闭 payloadDigest 后仍可通信", async () => {
-  const EP12 = "tcp://127.0.0.1:16020";
-  const KEY = "sec-encrypted-key-012";
+// ══════════════════════════════════════════════════════════
+//  安全集成（auth/encrypted）
+/* eslint-disable max-statements */
+// ══════════════════════════════════════════════════════════
 
-  const m12 = new ZNL({
+runner.section("encrypted 安全集成");
+
+await runner.test(
+  "encrypted 模式：RPC + PUB/SUB 正常（透明加解密）",
+  async () => {
+    const EP10 = "tcp://127.0.0.1:16012";
+    const KEY = "sec-encrypted-key-001";
+
+    const m10 = new ZNL({
+      role: "master",
+      id: "m10",
+      endpoints: { router: EP10 },
+      authKey: KEY,
+      encrypted: true,
+    });
+    const s10 = new ZNL({
+      role: "slave",
+      id: "s10",
+      endpoints: { router: EP10 },
+      authKey: KEY,
+      encrypted: true,
+    });
+
+    const pubLog = [];
+    s10.subscribe("news", ({ payload }) => pubLog.push(toText(payload)));
+
+    m10.ROUTER(async ({ payload }) => `ENC-M:${toText(payload)}`);
+    s10.DEALER(async ({ payload }) => `ENC-S:${toText(payload)}`);
+
+    await m10.start();
+    await s10.start();
+    await delay(250);
+
+    const r1 = await s10.DEALER("hello-encrypted", { timeoutMs: 3000 });
+    runner.assert(
+      toText(r1) === "ENC-M:hello-encrypted",
+      `encrypted slave→master 正常 → "${toText(r1)}"`,
+    );
+
+    const r2 = await m10.ROUTER("s10", "ping-encrypted", { timeoutMs: 3000 });
+    runner.assert(
+      toText(r2) === "ENC-S:ping-encrypted",
+      `encrypted master→slave 正常 → "${toText(r2)}"`,
+    );
+
+    m10.publish("news", "encrypted-news-1");
+    await delay(120);
+    runner.assert(
+      pubLog.length === 1,
+      `encrypted 广播收到 1 条 → ${pubLog.length}`,
+    );
+    runner.assert(
+      pubLog[0] === "encrypted-news-1",
+      `encrypted 广播内容匹配 → "${pubLog[0]}"`,
+    );
+
+    await s10.stop();
+    await m10.stop();
+  },
+);
+
+await runner.test(
+  "encrypted 模式：payloadDigest 配置不一致（publish）触发 auth_failed",
+  async () => {
+    const EP_PD = "tcp://127.0.0.1:16024";
+    const KEY = "sec-encrypted-pub-digest";
+
+    const mPD = new ZNL({
+      role: "master",
+      id: "m-pd",
+      endpoints: { router: EP_PD },
+      authKey: KEY,
+      encrypted: true,
+      enablePayloadDigest: false, // 故意不写 digest
+    });
+    const sPD = new ZNL({
+      role: "slave",
+      id: "s-pd",
+      endpoints: { router: EP_PD },
+      authKey: KEY,
+      encrypted: true,
+      enablePayloadDigest: true, // 强制校验
+    });
+
+    let authFailed = false;
+    let received = false;
+    sPD.on("auth_failed", () => {
+      authFailed = true;
+    });
+    sPD.subscribe("news", () => {
+      received = true;
+    });
+
+    await mPD.start();
+    await sPD.start();
+    await delay(200);
+
+    mPD.publish("news", "digest-mismatch");
+    await delay(200);
+
+    runner.assert(authFailed, "slave 侧 auth_failed 已触发");
+    runner.assert(!received, "认证失败不应收到 publish");
+
+    await sPD.stop();
+    await mPD.stop();
+  },
+);
+
+await runner.test("encrypted 模式：关闭 payloadDigest 后仍可通信", async () => {
+  const EP_PD_OFF = "tcp://127.0.0.1:16037";
+  const KEY = "sec-encrypted-digest-off";
+
+  const mPD0 = new ZNL({
     role: "master",
-    id: "m12",
-    endpoints: { router: EP12 },
+    id: "m-pd0",
+    endpoints: { router: EP_PD_OFF },
     authKey: KEY,
     encrypted: true,
-    enablePayloadDigest: false, // 关闭摘要校验
+    enablePayloadDigest: false,
   });
-  const s12 = new ZNL({
+  const sPD0 = new ZNL({
     role: "slave",
-    id: "s12",
-    endpoints: { router: EP12 },
+    id: "s-pd0",
+    endpoints: { router: EP_PD_OFF },
     authKey: KEY,
     encrypted: true,
     enablePayloadDigest: false,
   });
 
-  m12.ROUTER(async ({ payload }) => `M12:${toText(payload)}`);
+  mPD0.ROUTER(async ({ payload }) => `MPD0:${toText(payload)}`);
 
-  await m12.start();
-  await s12.start();
+  await mPD0.start();
+  await sPD0.start();
   await delay(150);
 
-  const r = await s12.DEALER("no-digest", { timeoutMs: 2000 });
-  assert(toText(r) === "M12:no-digest", `关闭摘要仍可通信 → "${toText(r)}"`);
+  const r = await sPD0.DEALER("no-digest", { timeoutMs: 2000 });
+  runner.assert(
+    toText(r) === "MPD0:no-digest",
+    `关闭摘要仍可通信 → "${toText(r)}"`,
+  );
 
-  await s12.stop();
-  await m12.stop();
+  await sPD0.stop();
+  await mPD0.stop();
 });
 
-await test("encrypted 模式：payloadDigest 配置不一致可能导致认证失败", async () => {
-  const EP13 = "tcp://127.0.0.1:16021";
-  const KEY = "sec-encrypted-key-013";
+await runner.test(
+  "encrypted 模式：payloadDigest 配置不一致（RPC）可能导致认证失败",
+  async () => {
+    const EP_PD_RPC = "tcp://127.0.0.1:16038";
+    const KEY = "sec-encrypted-digest-rpc";
 
-  const m13 = new ZNL({
+    const mPR = new ZNL({
+      role: "master",
+      id: "m-pr",
+      endpoints: { router: EP_PD_RPC },
+      authKey: KEY,
+      encrypted: true,
+      enablePayloadDigest: true,
+    });
+    const sPR = new ZNL({
+      role: "slave",
+      id: "s-pr",
+      endpoints: { router: EP_PD_RPC },
+      authKey: KEY,
+      encrypted: true,
+      enablePayloadDigest: false, // 故意不一致
+    });
+
+    let authFailedFired = false;
+    mPR.on("auth_failed", () => {
+      authFailedFired = true;
+    });
+
+    mPR.ROUTER(async ({ payload }) => `MPR:${toText(payload)}`);
+
+    await mPR.start();
+    await sPR.start();
+    await delay(150);
+
+    try {
+      await sPR.DEALER("digest-mismatch", { timeoutMs: 800 });
+      runner.fail("配置不一致不应收到响应");
+    } catch (e) {
+      runner.assert(
+        e.message.includes("请求超时"),
+        `请求正确超时 → "${e.message}"`,
+      );
+      runner.assert(authFailedFired, "master 侧 auth_failed 事件已触发");
+    } finally {
+      await sPR.stop();
+      await mPR.stop();
+    }
+  },
+);
+
+await runner.test(
+  "encrypted 模式：防重放（同 nonce+requestId）触发拒绝",
+  async () => {
+    const EP_RP = "tcp://127.0.0.1:16030";
+    const KEY = "sec-replay-key";
+    const NODE = "replay-slave";
+
+    const mR = new ZNL({
+      role: "master",
+      id: "m-replay",
+      endpoints: { router: EP_RP },
+      authKey: KEY,
+      encrypted: true,
+    });
+
+    let requestCount = 0;
+    let authFailed = 0;
+    mR.on("request", () => {
+      requestCount++;
+    });
+    mR.on("auth_failed", () => {
+      authFailed++;
+    });
+    mR.ROUTER(async () => "ok");
+
+    await mR.start();
+
+    const dealer = new zmq.Dealer({ routingId: NODE });
+    dealer.connect(EP_RP);
+    await delay(100);
+
+    const requestId = "replay-req-001";
+    const nonce = "fixed-nonce-001";
+    const ts = Date.now();
+
+    const { frames } = buildEncryptedRequestFrames({
+      authKey: KEY,
+      nodeId: NODE,
+      requestId,
+      payload: "hello",
+      nonce,
+      timestamp: ts,
+    });
+
+    await dealer.send(frames);
+    await delay(150);
+
+    await dealer.send(frames); // 同 nonce + requestId
+    await delay(200);
+
+    runner.assert(requestCount === 1, `仅接受一次请求 → ${requestCount}`);
+    runner.assert(authFailed >= 1, `重放触发 auth_failed → ${authFailed}`);
+
+    dealer.close();
+    await mR.stop();
+  },
+);
+
+await runner.test(
+  "encrypted 模式：同 nonce 不同 requestId 不应触发重放",
+  async () => {
+    const EP_RP2 = "tcp://127.0.0.1:16039";
+    const KEY = "sec-replay-key-2";
+    const NODE = "replay-slave-2";
+
+    const mR2 = new ZNL({
+      role: "master",
+      id: "m-replay-2",
+      endpoints: { router: EP_RP2 },
+      authKey: KEY,
+      encrypted: true,
+    });
+
+    let requestCount = 0;
+    let authFailed = 0;
+    mR2.on("request", () => {
+      requestCount++;
+    });
+    mR2.on("auth_failed", () => {
+      authFailed++;
+    });
+    mR2.ROUTER(async () => "ok");
+
+    await mR2.start();
+
+    const dealer = new zmq.Dealer({ routingId: NODE });
+    dealer.connect(EP_RP2);
+    await delay(100);
+
+    const nonce = "fixed-nonce-002";
+    const ts = Date.now();
+
+    const { frames: frames1 } = buildEncryptedRequestFrames({
+      authKey: KEY,
+      nodeId: NODE,
+      requestId: "replay-req-a",
+      payload: "hello-a",
+      nonce,
+      timestamp: ts,
+    });
+
+    const { frames: frames2 } = buildEncryptedRequestFrames({
+      authKey: KEY,
+      nodeId: NODE,
+      requestId: "replay-req-b",
+      payload: "hello-b",
+      nonce,
+      timestamp: ts,
+    });
+
+    await dealer.send(frames1);
+    await delay(120);
+    await dealer.send(frames2);
+    await delay(200);
+
+    runner.assert(requestCount === 2, `两次请求均应接受 → ${requestCount}`);
+    runner.assert(authFailed === 0, `不应触发 auth_failed → ${authFailed}`);
+
+    dealer.close();
+    await mR2.stop();
+  },
+);
+
+await runner.test("encrypted 模式：时间漂移超限被拒绝", async () => {
+  const EP_TS = "tcp://127.0.0.1:16033";
+  const KEY = "sec-time-skew";
+  const NODE = "time-skew-slave";
+
+  const mT = new ZNL({
     role: "master",
-    id: "m13",
-    endpoints: { router: EP13 },
+    id: "m-time",
+    endpoints: { router: EP_TS },
     authKey: KEY,
     encrypted: true,
-    enablePayloadDigest: true,
+    maxTimeSkewMs: 50,
   });
-  const s13 = new ZNL({
+
+  let authFailed = false;
+  mT.on("auth_failed", () => {
+    authFailed = true;
+  });
+  mT.ROUTER(async () => "ok");
+
+  await mT.start();
+
+  const dealer = new zmq.Dealer({ routingId: NODE });
+  dealer.connect(EP_TS);
+  await delay(80);
+
+  const requestId = "time-req-001";
+  const nonce = "time-nonce-001";
+  const oldTs = Date.now() - 10_000;
+
+  const { frames } = buildEncryptedRequestFrames({
+    authKey: KEY,
+    nodeId: NODE,
+    requestId,
+    payload: "hello",
+    nonce,
+    timestamp: oldTs,
+  });
+
+  await dealer.send(frames);
+  await delay(200);
+
+  runner.assert(authFailed, "过期时间戳触发 auth_failed");
+
+  dealer.close();
+  await mT.stop();
+});
+
+await runner.test("authKeyMap 优先级：命中 map 时不回退", async () => {
+  const EP_PRI = "tcp://127.0.0.1:16034";
+
+  const mP = new ZNL({
+    role: "master",
+    id: "m-pri",
+    endpoints: { router: EP_PRI },
+    authKey: "fallback-key",
+    authKeyMap: { sPri: "map-key" },
+    encrypted: true,
+  });
+
+  let authFailed = false;
+  mP.on("auth_failed", () => {
+    authFailed = true;
+  });
+
+  const sPriWrong = new ZNL({
     role: "slave",
-    id: "s13",
-    endpoints: { router: EP13 },
-    authKey: KEY,
+    id: "sPri",
+    endpoints: { router: EP_PRI },
+    authKey: "fallback-key", // 应失败（map 优先）
     encrypted: true,
-    enablePayloadDigest: false, // 故意不一致
   });
 
-  let authFailedFired = false;
-  m13.on("auth_failed", () => {
-    authFailedFired = true;
-  });
+  mP.ROUTER(async ({ payload }) => `MP:${toText(payload)}`);
 
-  await m13.start();
-  await s13.start();
+  await mP.start();
+  await sPriWrong.start();
   await delay(150);
 
   try {
-    await s13.DEALER("digest-mismatch", { timeoutMs: 800 });
-    assert(false, "配置不一致不应收到响应");
+    await sPriWrong.DEALER("should-fail", { timeoutMs: 600 });
+    runner.fail("map 命中时不应回退到 authKey");
   } catch (e) {
-    assert(e.message.includes("请求超时"), `请求正确超时 → "${e.message}"`);
-    assert(authFailedFired, "master 侧 auth_failed 事件已触发");
-  } finally {
-    await s13.stop();
-    await m13.stop();
+    runner.assert(
+      e.message.includes("请求超时"),
+      `请求正确超时 → "${e.message}"`,
+    );
+    runner.assert(authFailed, "auth_failed 已触发");
   }
-});
 
-await test("encrypted 模式：错误 authKey 无法通信，并触发 auth_failed", async () => {
-  const EP11 = "tcp://127.0.0.1:16013";
+  await sPriWrong.stop();
 
-  const m11 = new ZNL({
-    role: "master",
-    id: "m11",
-    endpoints: { router: EP11 },
-    authKey: "right-key-11",
-    encrypted: true,
-  });
-  const s11 = new ZNL({
+  const sPriRight = new ZNL({
     role: "slave",
-    id: "s11",
-    endpoints: { router: EP11 },
-    authKey: "wrong-key-11",
+    id: "sPri",
+    endpoints: { router: EP_PRI },
+    authKey: "map-key",
     encrypted: true,
   });
 
-  m11.ROUTER(async ({ payload }) => `M11:${toText(payload)}`);
-
-  let authFailedFired = false;
-  m11.on("auth_failed", () => {
-    authFailedFired = true;
-  });
-
-  await m11.start();
-  await s11.start();
+  await sPriRight.start();
   await delay(150);
 
+  const r = await sPriRight.DEALER("ok", { timeoutMs: 1500 });
+  runner.assert(toText(r) === "MP:ok", `map key 正常 → "${toText(r)}"`);
+
+  await sPriRight.stop();
+  await mP.stop();
+});
+
+await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
+  const EP_SW = "tcp://127.0.0.1:16035";
+
+  const mS = new ZNL({
+    role: "master",
+    id: "m-sw",
+    endpoints: { router: EP_SW },
+    authKeyMap: { sSw: "k1" },
+    encrypted: true,
+  });
+
+  const sSw = new ZNL({
+    role: "slave",
+    id: "sSw",
+    endpoints: { router: EP_SW },
+    authKey: "k1",
+    encrypted: true,
+  });
+
+  mS.ROUTER(async ({ payload }) => `MS:${toText(payload)}`);
+
+  await mS.start();
+  await sSw.start();
+  await delay(150);
+
+  const r1 = await sSw.DEALER("before-switch", { timeoutMs: 1500 });
+  runner.assert(toText(r1) === "MS:before-switch", "切换前通信正常");
+
+  // 切换 master key
+  mS.addAuthKey("sSw", "k2");
+  await delay(100);
+
+  let failed = false;
   try {
-    await s11.DEALER("forbidden-encrypted", { timeoutMs: 800 });
-    assert(false, "错误 authKey 不应收到响应");
+    await sSw.DEALER("after-switch", { timeoutMs: 600 });
   } catch (e) {
-    assert(e.message.includes("请求超时"), `请求正确超时 → "${e.message}"`);
-    assert(authFailedFired, "master 侧 auth_failed 事件已触发");
-  } finally {
-    await s11.stop();
-    await m11.stop();
+    failed = String(e?.message ?? e).includes("请求超时");
   }
+  runner.assert(failed, "切换后旧 key 失效");
+
+  await sSw.stop();
+
+  const sSw2 = new ZNL({
+    role: "slave",
+    id: "sSw",
+    endpoints: { router: EP_SW },
+    authKey: "k2",
+    encrypted: true,
+  });
+
+  await sSw2.start();
+  await delay(150);
+
+  const r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1500 });
+  runner.assert(toText(r2) === "MS:after-reconnect", "切换后新 key 生效");
+
+  await sSw2.stop();
+  await mS.stop();
+});
+
+await runner.test(
+  "encrypted 模式：authKeyMap 未命中时回退到 authKey",
+  async () => {
+    const EP16 = "tcp://127.0.0.1:16026";
+
+    const m16 = new ZNL({
+      role: "master",
+      id: "m16",
+      endpoints: { router: EP16 },
+      authKey: "fallback-key",
+      authKeyMap: { s16a: "k16a" },
+      encrypted: true,
+    });
+
+    const s16b = new ZNL({
+      role: "slave",
+      id: "s16b",
+      endpoints: { router: EP16 },
+      authKey: "fallback-key",
+      encrypted: true,
+    });
+
+    m16.ROUTER(async ({ payload }) => `M16:${toText(payload)}`);
+
+    await m16.start();
+    await s16b.start();
+    await delay(150);
+
+    const r = await s16b.DEALER("should-pass", { timeoutMs: 1500 });
+    runner.assert(
+      toText(r) === "M16:should-pass",
+      `回退到 authKey 生效 → "${toText(r)}"`,
+    );
+
+    await s16b.stop();
+    await m16.stop();
+  },
+);
+
+await runner.test(
+  "encrypted 模式：authKeyMap 动态 add/remove 立即生效",
+  async () => {
+    const EP17 = "tcp://127.0.0.1:16027";
+
+    const m17 = new ZNL({
+      role: "master",
+      id: "m17",
+      endpoints: { router: EP17 },
+      authKeyMap: {},
+      encrypted: true,
+    });
+
+    const s17 = new ZNL({
+      role: "slave",
+      id: "s17",
+      endpoints: { router: EP17 },
+      authKey: "k17",
+      encrypted: true,
+    });
+
+    let authFailedFired = false;
+    let disconnected = false;
+    m17.on("auth_failed", () => {
+      authFailedFired = true;
+    });
+    m17.on("slave_disconnected", (id) => {
+      if (id === "s17") disconnected = true;
+    });
+
+    m17.ROUTER(async ({ payload }) => `M17:${toText(payload)}`);
+
+    await m17.start();
+    await s17.start();
+    await delay(150);
+
+    try {
+      await s17.DEALER("before-add", { timeoutMs: 500 });
+      runner.fail("未 addAuthKey 前不应收到响应");
+    } catch (e) {
+      runner.assert(
+        e.message.includes("请求超时"),
+        `请求正确超时 → "${e.message}"`,
+      );
+      runner.assert(authFailedFired, "master 侧 auth_failed 事件已触发");
+    }
+
+    m17.addAuthKey("s17", "k17");
+    await delay(100);
+
+    const r1 = await s17.DEALER("after-add", { timeoutMs: 1500 });
+    runner.assert(
+      toText(r1) === "M17:after-add",
+      `addAuthKey 生效 → "${toText(r1)}"`,
+    );
+
+    m17.removeAuthKey("s17");
+    await delay(100);
+    runner.assert(disconnected, "removeAuthKey 触发 slave_disconnected");
+
+    try {
+      await s17.DEALER("after-remove", { timeoutMs: 500 });
+      runner.fail("removeAuthKey 后不应收到响应");
+    } catch (e) {
+      runner.assert(
+        e.message.includes("请求超时"),
+        `请求正确超时 → "${e.message}"`,
+      );
+    } finally {
+      await s17.stop();
+      await m17.stop();
+    }
+  },
+);
+
+// ══════════════════════════════════════════════════════════
+//  SendQueue 顺序（主→从请求顺序）
+// ══════════════════════════════════════════════════════════
+
+runner.section("SendQueue 顺序");
+
+await runner.test("master→slave 顺序保持（20 条）", async () => {
+  const EP_SQ = "tcp://127.0.0.1:16036";
+  const mQ = new ZNL({
+    role: "master",
+    id: "m-sq",
+    endpoints: { router: EP_SQ },
+  });
+  const sQ = new ZNL({
+    role: "slave",
+    id: "s-sq",
+    endpoints: { router: EP_SQ },
+  });
+
+  const seq = [];
+  await sQ.DEALER(async ({ payload }) => {
+    const n = Number(toText(payload).split("-")[1] ?? -1);
+    seq.push(n);
+    return `ACK-${n}`;
+  });
+
+  await mQ.start();
+  await sQ.start();
+  await delay(200);
+
+  const tasks = Array.from({ length: 20 }, (_, i) =>
+    mQ.ROUTER("s-sq", `seq-${i}`, { timeoutMs: 3000 }),
+  );
+  await Promise.all(tasks);
+
+  const ok = seq.every((n, i) => n === i);
+  runner.assert(ok, `顺序一致 → [${seq.join(", ")}]`);
+
+  await sQ.stop();
+  await mQ.stop();
+});
+
+// ══════════════════════════════════════════════════════════
+//  PendingManager key 冲突保护（轻量单元）
+// ══════════════════════════════════════════════════════════
+
+runner.section("PendingManager key");
+
+await runner.test("master→slave key 含 identity 避免碰撞", async () => {
+  const pm = new PendingManager(10);
+  const k1 = pm.key("req-1", "s1");
+  const k2 = pm.key("req-1", "s2");
+  runner.assert(k1 !== k2, `不同 identity key 不同 → ${k1} vs ${k2}`);
 });
 
 // ─── 清理主测试节点 ───────────────────────────────────────────────────────────
@@ -1061,15 +1643,6 @@ await test("encrypted 模式：错误 authKey 无法通信，并触发 auth_fail
 await slave.stop();
 await master.stop();
 
-// ─── 汇总输出 ─────────────────────────────────────────────────────────────────
+// ─── 汇总 ─────────────────────────────────────────────────────────────────────
 
-console.log("\n" + "=".repeat(56));
-console.log(`  通过: ${passed}   失败: ${failed}`);
-console.log("=".repeat(56));
-
-if (failed > 0) {
-  process.exit(1);
-} else {
-  console.log("\n  ✓ 全部测试通过\n");
-  process.exit(0);
-}
+runner.summary();

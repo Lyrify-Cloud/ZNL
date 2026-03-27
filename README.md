@@ -15,7 +15,8 @@
   - `true`：签名 + 防重放 + payload 透明加密（AES-256-GCM）
 - 可选关闭 payload 摘要校验（`enablePayloadDigest=false`）以提升性能
   - 建议 master/slave 两端保持一致配置，避免认证不一致
-- `authKey` 仅在 `encrypted=true` 时必填
+- `authKey` 或 `authKeyMap` 仅在 `encrypted=true` 时必填
+- `authKeyMap` 支持 master 按 `slaveId` 配置不同 key（未命中时会回退到 `authKey`）
 - Payload 支持 `string`、`Buffer`、`Uint8Array` 及其数组（多帧）
 
 ## 安装
@@ -103,6 +104,7 @@ new ZNL({
   },
   maxPending: 1000,
   authKey: "",
+  authKeyMap: { "slave-001": "k1", "slave-002": "k2" },
   heartbeatInterval: 3000,
   heartbeatTimeoutMs: 0,
   encrypted: false,
@@ -118,7 +120,8 @@ new ZNL({
 | `id` | ✓ | 节点唯一标识；slave 端同时作为 ZMQ `routingId` |
 | `endpoints.router` | | ROUTER 端点，默认 `tcp://127.0.0.1:6003` |
 | `maxPending` | | 最大并发 RPC 请求数，默认 `1000`；`0` 表示不限制 |
-| `authKey` | | 共享认证 Key；仅在 `encrypted=true` 时必填（用于签名/加密） |
+| `authKey` | | 共享认证 Key；与 `authKeyMap` 二选一（`encrypted=true` 时至少提供一个） |
+| `authKeyMap` | | master 侧 slaveId → authKey 映射；未命中时回退到 `authKey` |
 | `heartbeatInterval` | | 心跳间隔（毫秒），默认 `3000`，`0` 表示禁用心跳 |
 | `heartbeatTimeoutMs` | | 心跳超时时间（毫秒），默认 `0` 表示使用 `heartbeatInterval × 3` |
 | `encrypted` | | 是否启用加密：`false`（默认，明文） / `true`（签名+防重放+透明加密） |
@@ -157,6 +160,18 @@ new ZNL({
 
 - `identityOrHandler` 为函数时：注册 master 侧自动回复处理器（Slave 发来 RPC 请求时触发）
 - `identityOrHandler` 为 identity（slave ID）时：Master 主动向指定 Slave 发送 RPC 请求并等待响应，返回 `Promise<Buffer | Array>`
+
+### `addAuthKey(slaveId, authKey)`
+
+**Master 侧调用：**
+
+- 动态添加/更新某个 slave 的 authKey（立即生效）
+
+### `removeAuthKey(slaveId)`
+
+**Master 侧调用：**
+
+- 移除某个 slave 的 authKey（立即生效），并触发 `slave_disconnected`
 
 ### `options.timeoutMs`
 

@@ -54,6 +54,7 @@ const slave = new ZNL({
   },
   authKey,
   encrypted,
+  maxPending: "0",
 });
 
 /** 将 Buffer 或任意值转为字符串 */

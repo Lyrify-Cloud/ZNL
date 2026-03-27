@@ -127,13 +127,19 @@ export class ZNL extends EventEmitter {
   /** @type {boolean} 是否启用 payload 摘要校验（安全模式用） */
   #enablePayloadDigest = DEFAULT_ENABLE_PAYLOAD_DIGEST;
 
+  /** @type {Map<string, string>} master 侧 authKey 配置表（按 slaveId） */
+  #authKeyMap = new Map();
+
+  /** @type {Map<string, { signKey: Buffer, encryptKey: Buffer }>} master 侧派生密钥缓存 */
+  #slaveKeyCache = new Map();
+
   // ─── PUB/SUB 状态 ────────────────────────────────────────────────────────
 
   /**
    * master 侧：已注册的在线 slave 表
    * key   = slaveId（字符串）
-   * value = { identity: Buffer, lastSeen: number }
-   * @type {Map<string, { identity: Buffer, lastSeen: number }>}
+   * value = { identity: Buffer, lastSeen: number, signKey: Buffer|null, encryptKey: Buffer|null }
+   * @type {Map<string, { identity: Buffer, lastSeen: number, signKey: Buffer|null, encryptKey: Buffer|null }>}
    */
   #slaves = new Map();
 
@@ -185,6 +191,7 @@ export class ZNL extends EventEmitter {
    *   endpoints?         : { router?: string },
    *   maxPending?          : number,
    *   authKey?             : string,
+   *   authKeyMap?          : Record<string, string>,
    *   heartbeatInterval?   : number,
    *   heartbeatTimeoutMs?  : number,
    *   encrypted?           : boolean,
@@ -199,6 +206,7 @@ export class ZNL extends EventEmitter {
     endpoints = {},
     maxPending = DEFAULT_MAX_PENDING,
     authKey = "",
+    authKeyMap = null,
     heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL,
     heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
     encrypted = false,
@@ -220,16 +228,35 @@ export class ZNL extends EventEmitter {
     this.endpoints = { ...DEFAULT_ENDPOINTS, ...endpoints };
     this.authKey = authKey == null ? "" : String(authKey);
 
+    if (this.role === "master") {
+      if (authKeyMap != null) {
+        if (typeof authKeyMap !== "object") {
+          throw new TypeError(
+            "`authKeyMap` 必须是对象（slaveId -> authKey）。",
+          );
+        }
+        for (const [slaveId, key] of Object.entries(authKeyMap)) {
+          if (key == null) continue;
+          this.#authKeyMap.set(String(slaveId), String(key));
+        }
+      }
+    }
+
     this.encrypted = Boolean(encrypted);
     this.#secureEnabled = this.encrypted;
 
     if (this.#secureEnabled) {
-      if (!this.authKey) {
-        throw new Error("启用 encrypted=true 时，必须提供非空 authKey。");
+      const hasAuthMap = this.role === "master" && authKeyMap != null;
+      if (!this.authKey && !hasAuthMap) {
+        throw new Error(
+          "启用 encrypted=true 时，必须提供非空 authKey 或 authKeyMap。",
+        );
       }
-      const { signKey, encryptKey } = deriveKeys(this.authKey);
-      this.#signKey = signKey;
-      this.#encryptKey = encryptKey;
+      if (this.authKey) {
+        const { signKey, encryptKey } = deriveKeys(this.authKey);
+        this.#signKey = signKey;
+        this.#encryptKey = encryptKey;
+      }
     }
 
     this.#pending = new PendingManager(maxPending);
@@ -356,19 +383,34 @@ export class ZNL extends EventEmitter {
     if (this.#slaves.size === 0) return;
 
     const topicText = String(topic);
-    const payloadFrames = this.#sealPayloadFrames(
-      "publish",
-      topicText,
-      payload,
-    );
-    const authProof = this.#secureEnabled
-      ? this.#createAuthProof("publish", topicText, payloadFrames)
-      : "";
-
-    const frames = buildPublishFrames(topicText, payloadFrames, authProof);
 
     for (const [slaveId, entry] of this.#slaves) {
+      const keys = this.#secureEnabled ? this.#resolveSlaveKeys(slaveId) : null;
+      if (this.#secureEnabled && !keys) {
+        if (this.#slaves.delete(slaveId)) {
+          this.emit("slave_disconnected", slaveId);
+        }
+        continue;
+      }
+
+      const payloadFrames = this.#sealPayloadFrames(
+        "publish",
+        topicText,
+        payload,
+        keys?.encryptKey ?? null,
+      );
+      const authProof = this.#secureEnabled
+        ? this.#createAuthProof(
+            "publish",
+            topicText,
+            payloadFrames,
+            keys.signKey,
+          )
+        : "";
+
+      const frames = buildPublishFrames(topicText, payloadFrames, authProof);
       const idFrame = identityToBuffer(entry.identity);
+
       this.#sendQueue
         .enqueue("router", () => socket.send([idFrame, ...frames]))
         .catch(() => {
@@ -422,6 +464,63 @@ export class ZNL extends EventEmitter {
    */
   get slaves() {
     return [...this.#slaves.keys()];
+  }
+
+  /**
+   * 【Master 侧】动态添加/更新某个 slave 的 authKey（立即生效）
+   * @param {string} slaveId
+   * @param {string} authKey
+   * @returns {this}
+   */
+  addAuthKey(slaveId, authKey) {
+    if (this.role !== "master") {
+      throw new Error("addAuthKey() 只能在 master 侧调用。");
+    }
+    const id = String(slaveId ?? "");
+    if (!id) {
+      throw new Error("slaveId 不能为空。");
+    }
+    const key = authKey == null ? "" : String(authKey);
+    if (!key) {
+      throw new Error("authKey 不能为空。");
+    }
+
+    this.#authKeyMap.set(id, key);
+
+    if (this.#secureEnabled) {
+      const derived = deriveKeys(key);
+      this.#slaveKeyCache.set(id, derived);
+      const entry = this.#slaves.get(id);
+      if (entry) {
+        entry.signKey = derived.signKey;
+        entry.encryptKey = derived.encryptKey;
+      }
+    }
+    return this;
+  }
+
+  /**
+   * 【Master 侧】移除某个 slave 的 authKey（立即生效）
+   * @param {string} slaveId
+   * @returns {this}
+   */
+  removeAuthKey(slaveId) {
+    if (this.role !== "master") {
+      throw new Error("removeAuthKey() 只能在 master 侧调用。");
+    }
+    const id = String(slaveId ?? "");
+    if (!id) {
+      throw new Error("slaveId 不能为空。");
+    }
+
+    this.#authKeyMap.delete(id);
+    this.#slaveKeyCache.delete(id);
+
+    if (this.#slaves.has(id)) {
+      this.#slaves.delete(id);
+      this.emit("slave_disconnected", id);
+    }
+    return this;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -486,6 +585,7 @@ export class ZNL extends EventEmitter {
     this.#sockets = {};
     this.#sendQueue.clear();
     this.#slaves.clear();
+    this.#slaveKeyCache.clear();
     this.#masterNodeId = null;
     this.#replayGuard.clear();
   }
@@ -555,17 +655,34 @@ export class ZNL extends EventEmitter {
     // ── 心跳 ────────────────────────────────────────────────────────────────
     if (parsed.kind === "heartbeat") {
       if (this.#secureEnabled) {
+        const keys = this.#resolveSlaveKeys(identityText);
+        if (!keys) {
+          this.#emitAuthFailed(event, "未配置该 slave 的 authKey。");
+          if (this.#slaves.delete(identityText)) {
+            this.emit("slave_disconnected", identityText);
+          }
+          return;
+        }
+
         const v = this.#verifyIncomingProof({
           kind: "heartbeat",
           proofToken: parsed.authProof,
           requestId: "",
           payloadFrames: [],
           expectedNodeId: identityText,
+          signKey: keys.signKey,
         });
         if (!v.ok) {
           this.#emitAuthFailed(event, v.error);
           return;
         }
+
+        this.#ensureSlaveOnline(identityText, identity, {
+          touch: true,
+          signKey: keys.signKey,
+          encryptKey: keys.encryptKey,
+        });
+        return;
       }
 
       // 心跳视为在线确认：必要时自动补注册
@@ -576,20 +693,42 @@ export class ZNL extends EventEmitter {
     // ── 注册 ────────────────────────────────────────────────────────────────
     if (parsed.kind === "register") {
       if (this.#secureEnabled) {
+        const keys = this.#resolveSlaveKeys(identityText);
+        if (!keys) {
+          this.#emitAuthFailed(event, "未配置该 slave 的 authKey。");
+          if (this.#slaves.delete(identityText)) {
+            this.emit("slave_disconnected", identityText);
+          }
+          return;
+        }
+
         const v = this.#verifyIncomingProof({
           kind: "register",
           proofToken: parsed.authKey, // register 复用 authKey 字段承载 proof
           requestId: "",
           payloadFrames: [],
           expectedNodeId: identityText,
+          signKey: keys.signKey,
         });
         if (!v.ok) {
           this.#emitAuthFailed(event, v.error);
           return;
         }
+
+        this.#ensureSlaveOnline(identityText, identity, {
+          touch: true,
+          signKey: keys.signKey,
+          encryptKey: keys.encryptKey,
+        });
+        return;
       }
 
-      this.#slaves.set(identityText, { identity, lastSeen: Date.now() });
+      this.#slaves.set(identityText, {
+        identity,
+        lastSeen: Date.now(),
+        signKey: null,
+        encryptKey: null,
+      });
       this.emit("slave_connected", identityText);
       return;
     }
@@ -607,12 +746,22 @@ export class ZNL extends EventEmitter {
       let finalFrames = parsed.payloadFrames;
 
       if (this.#secureEnabled) {
+        const keys = this.#resolveSlaveKeys(identityText);
+        if (!keys) {
+          this.#emitAuthFailed(event, "未配置该 slave 的 authKey。");
+          if (this.#slaves.delete(identityText)) {
+            this.emit("slave_disconnected", identityText);
+          }
+          return;
+        }
+
         const v = this.#verifyIncomingProof({
           kind: "request",
           proofToken: parsed.authKey, // request 复用 authKey 字段承载 proof
           requestId: parsed.requestId,
           payloadFrames: parsed.payloadFrames,
           expectedNodeId: identityText,
+          signKey: keys.signKey,
         });
         if (!v.ok) {
           this.#emitAuthFailed(event, v.error);
@@ -620,7 +769,11 @@ export class ZNL extends EventEmitter {
         }
 
         // 认证通过后允许补注册（避免 master 重启后丢失在线表）
-        this.#ensureSlaveOnline(identityText, identity, { touch: true });
+        this.#ensureSlaveOnline(identityText, identity, {
+          touch: true,
+          signKey: keys.signKey,
+          encryptKey: keys.encryptKey,
+        });
 
         if (this.encrypted) {
           try {
@@ -629,6 +782,7 @@ export class ZNL extends EventEmitter {
               parsed.requestId,
               parsed.payloadFrames,
               identityText,
+              keys.encryptKey,
             );
           } catch (error) {
             this.#emitAuthFailed(
@@ -663,12 +817,22 @@ export class ZNL extends EventEmitter {
       let finalFrames = parsed.payloadFrames;
 
       if (this.#secureEnabled) {
+        const keys = this.#resolveSlaveKeys(identityText);
+        if (!keys) {
+          this.#emitAuthFailed(event, "未配置该 slave 的 authKey。");
+          if (this.#slaves.delete(identityText)) {
+            this.emit("slave_disconnected", identityText);
+          }
+          return;
+        }
+
         const v = this.#verifyIncomingProof({
           kind: "response",
           proofToken: parsed.authProof,
           requestId: parsed.requestId,
           payloadFrames: parsed.payloadFrames,
           expectedNodeId: identityText,
+          signKey: keys.signKey,
         });
         if (!v.ok) {
           this.#emitAuthFailed(event, v.error);
@@ -676,7 +840,11 @@ export class ZNL extends EventEmitter {
         }
 
         // 认证通过后允许补注册（避免 master 重启后丢失在线表）
-        this.#ensureSlaveOnline(identityText, identity, { touch: true });
+        this.#ensureSlaveOnline(identityText, identity, {
+          touch: true,
+          signKey: keys.signKey,
+          encryptKey: keys.encryptKey,
+        });
 
         if (this.encrypted) {
           try {
@@ -685,6 +853,7 @@ export class ZNL extends EventEmitter {
               parsed.requestId,
               parsed.payloadFrames,
               identityText,
+              keys.encryptKey,
             );
           } catch (error) {
             this.#emitAuthFailed(
@@ -927,13 +1096,21 @@ export class ZNL extends EventEmitter {
       identityText,
     );
 
+    const keys = this.#secureEnabled
+      ? this.#resolveSlaveKeys(identityText)
+      : null;
+    if (this.#secureEnabled && !keys) {
+      throw new Error(`未配置该 slave 的 authKey：${identityText}`);
+    }
+
     const payloadFrames = this.#sealPayloadFrames(
       "request",
       requestId,
       payload,
+      keys?.encryptKey ?? null,
     );
     const proofOrAuthKey = this.#secureEnabled
-      ? this.#createAuthProof("request", requestId, payloadFrames)
+      ? this.#createAuthProof("request", requestId, payloadFrames, keys.signKey)
       : "";
 
     const frames = buildRequestFrames(requestId, payloadFrames, proofOrAuthKey);
@@ -981,15 +1158,29 @@ export class ZNL extends EventEmitter {
    */
   async #replyTo(identity, requestId, payload) {
     const socket = this.#requireSocket("router", "ROUTER");
+    const identityText = identityToString(identity);
     const idFrame = identityToBuffer(identity);
+
+    const keys = this.#secureEnabled
+      ? this.#resolveSlaveKeys(identityText)
+      : null;
+    if (this.#secureEnabled && !keys) {
+      throw new Error(`未配置该 slave 的 authKey：${identityText}`);
+    }
 
     const payloadFrames = this.#sealPayloadFrames(
       "response",
       requestId,
       payload,
+      keys?.encryptKey ?? null,
     );
     const authProof = this.#secureEnabled
-      ? this.#createAuthProof("response", requestId, payloadFrames)
+      ? this.#createAuthProof(
+          "response",
+          requestId,
+          payloadFrames,
+          keys.signKey,
+        )
       : "";
 
     const frames = buildResponseFrames(requestId, payloadFrames, authProof);
@@ -1061,8 +1252,9 @@ export class ZNL extends EventEmitter {
    * @param {Buffer[]} payloadFrames
    * @returns {string}
    */
-  #createAuthProof(kind, requestId, payloadFrames) {
-    if (!this.#secureEnabled || !this.#signKey) return "";
+  #createAuthProof(kind, requestId, payloadFrames, signKeyOverride = null) {
+    const signKey = signKeyOverride ?? this.#signKey;
+    if (!this.#secureEnabled || !signKey) return "";
 
     const envelope = {
       kind: String(kind),
@@ -1079,7 +1271,7 @@ export class ZNL extends EventEmitter {
     // 保留 canonical 文本，便于后续排障（签名实际在 token 内完成）
     canonicalSignInput(envelope);
 
-    return encodeAuthProofToken(this.#signKey, envelope);
+    return encodeAuthProofToken(signKey, envelope);
   }
 
   /**
@@ -1100,9 +1292,12 @@ export class ZNL extends EventEmitter {
     requestId,
     payloadFrames,
     expectedNodeId = null,
+    signKey = null,
   }) {
     if (!this.#secureEnabled) return { ok: true, envelope: null };
-    if (!this.#signKey) {
+
+    const verifyKey = signKey ?? this.#signKey;
+    if (!verifyKey) {
       return { ok: false, error: "签名密钥未初始化。" };
     }
 
@@ -1110,7 +1305,7 @@ export class ZNL extends EventEmitter {
       return { ok: false, error: "缺少认证证明（proofToken）。" };
     }
 
-    const decoded = decodeAuthProofToken(this.#signKey, proofToken, {
+    const decoded = decodeAuthProofToken(verifyKey, proofToken, {
       maxSkewMs: this.#maxTimeSkewMs,
       now: Date.now(),
     });
@@ -1167,13 +1362,14 @@ export class ZNL extends EventEmitter {
    * @param {*} payload
    * @returns {Buffer[]}
    */
-  #sealPayloadFrames(kind, requestId, payload) {
+  #sealPayloadFrames(kind, requestId, payload, encryptKeyOverride = null) {
     if (!this.encrypted) {
       // 非加密模式保持历史行为：沿用协议层的原始帧类型（string/Buffer）
       return normalizeFrames(payload);
     }
 
-    if (!this.#encryptKey) {
+    const encryptKey = encryptKeyOverride ?? this.#encryptKey;
+    if (!encryptKey) {
       throw new Error("加密密钥未初始化。");
     }
 
@@ -1183,11 +1379,7 @@ export class ZNL extends EventEmitter {
       "utf8",
     );
 
-    const { iv, ciphertext, tag } = encryptFrames(
-      this.#encryptKey,
-      rawFrames,
-      aad,
-    );
+    const { iv, ciphertext, tag } = encryptFrames(encryptKey, rawFrames, aad);
 
     // 用统一信封包装：version + iv + tag + ciphertext
     return [Buffer.from(SECURITY_ENVELOPE_VERSION), iv, tag, ciphertext];
@@ -1204,9 +1396,16 @@ export class ZNL extends EventEmitter {
    * @param {string} senderNodeId
    * @returns {Buffer[]}
    */
-  #openPayloadFrames(kind, requestId, payloadFrames, senderNodeId) {
+  #openPayloadFrames(
+    kind,
+    requestId,
+    payloadFrames,
+    senderNodeId,
+    encryptKeyOverride = null,
+  ) {
     if (!this.encrypted) return payloadFrames;
-    if (!this.#encryptKey) throw new Error("加密密钥未初始化。");
+    const encryptKey = encryptKeyOverride ?? this.#encryptKey;
+    if (!encryptKey) throw new Error("加密密钥未初始化。");
 
     if (!Array.isArray(payloadFrames) || payloadFrames.length !== 4) {
       throw new Error("加密信封格式非法：期望 4 帧。");
@@ -1222,7 +1421,7 @@ export class ZNL extends EventEmitter {
       "utf8",
     );
 
-    return decryptFrames(this.#encryptKey, iv, ciphertext, tag, aad);
+    return decryptFrames(encryptKey, iv, ciphertext, tag, aad);
   }
 
   /**
@@ -1247,7 +1446,11 @@ export class ZNL extends EventEmitter {
    * @param {Buffer|string|Uint8Array} identity
    * @param {{ touch?: boolean }} [options]
    */
-  #ensureSlaveOnline(identityText, identity, { touch = true } = {}) {
+  #ensureSlaveOnline(
+    identityText,
+    identity,
+    { touch = true, signKey = null, encryptKey = null } = {},
+  ) {
     const id = String(identityText ?? "");
     if (!id) return;
 
@@ -1255,14 +1458,53 @@ export class ZNL extends EventEmitter {
     const entry = this.#slaves.get(id);
     if (entry) {
       if (touch) entry.lastSeen = now;
+      if (signKey) entry.signKey = signKey;
+      if (encryptKey) entry.encryptKey = encryptKey;
       return;
     }
 
     this.#slaves.set(id, {
       identity: identityToBuffer(identity),
       lastSeen: now,
+      signKey: signKey ?? null,
+      encryptKey: encryptKey ?? null,
     });
     this.emit("slave_connected", id);
+  }
+
+  /**
+   * master 侧解析某个 slave 的签名/加密密钥
+   * - 优先匹配 authKeyMap
+   * - 未命中时回退到 this.authKey（若提供）
+   *
+   * @param {string} slaveId
+   * @returns {{ signKey: Buffer, encryptKey: Buffer }|null}
+   */
+  #resolveSlaveKeys(slaveId) {
+    if (!this.#secureEnabled) return null;
+
+    const id = String(slaveId ?? "");
+    if (!id) return null;
+
+    const cached = this.#slaveKeyCache.get(id);
+    if (cached) return cached;
+
+    let key = this.#authKeyMap.get(id);
+    if (!key && this.authKey) {
+      key = this.authKey;
+    }
+    if (!key) return null;
+
+    const derived = deriveKeys(key);
+    this.#slaveKeyCache.set(id, derived);
+
+    const entry = this.#slaves.get(id);
+    if (entry) {
+      entry.signKey = derived.signKey;
+      entry.encryptKey = derived.encryptKey;
+    }
+
+    return derived;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
