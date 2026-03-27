@@ -1506,6 +1506,8 @@ await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
   runner.assert(failed, "切换后旧 key 失效");
 
   await sSw.stop();
+  // 给 ROUTING_ID 交接留出时间，避免旧连接残留导致新连接注册/收发抖动
+  await delay(500);
 
   const sSw2 = new ZNL({
     role: "slave",
@@ -1516,23 +1518,24 @@ await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
   });
 
   await sSw2.start();
-  await delay(150);
+  await delay(250);
 
-  const registered = await waitForSlave(mS, "sSw", 3000);
-  runner.assert(registered, `重连后注册成功 → ${mS.slaves}`);
-
+  let registered = false;
   let r2;
   let r2Err;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 8; i++) {
+    registered = registered || (await waitForSlave(mS, "sSw", 800));
     try {
-      r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1500 });
+      r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1200 });
       r2Err = null;
       break;
     } catch (e) {
       r2Err = e;
-      await delay(200);
+      await delay(250);
     }
   }
+
+  runner.assert(registered, `重连后注册成功 → ${mS.slaves}`);
   runner.assert(
     r2 && toText(r2) === "MS:after-reconnect",
     r2 ? "切换后新 key 生效" : `切换后新 key 生效 → ${r2Err?.message ?? r2Err}`,

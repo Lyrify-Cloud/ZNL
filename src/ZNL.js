@@ -598,7 +598,7 @@ export class ZNL extends EventEmitter {
    * 初始化 Master 侧 ROUTER socket（bind 模式），并启动读循环和死节点扫描定时器
    */
   async #startMasterSockets() {
-    const router = new zmq.Router();
+    const router = new zmq.Router({ handover: true });
     await router.bind(this.endpoints.router);
     this.#sockets.router = router;
 
