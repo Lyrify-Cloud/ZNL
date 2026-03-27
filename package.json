@@ -1,6 +1,6 @@
 {
   "name": "@lyrify/znl",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "ZNL - ZeroMQ Node Link",
   "type": "module",
   "main": "./index.js",
@@ -51,9 +51,9 @@
     "zeromq": "^6.5.0"
   },
   "devDependencies": {
-    "eslint": "^8.57.0",
-    "eslint-plugin-import": "^2.29.1",
-    "prettier": "^3.2.5"
+    "eslint": "^9.39.4",
+    "eslint-plugin-import": "^2.32.0",
+    "prettier": "^3.8.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

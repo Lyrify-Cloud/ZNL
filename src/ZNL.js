@@ -568,8 +568,8 @@ export class ZNL extends EventEmitter {
         }
       }
 
-      const entry = this.#slaves.get(identityText);
-      if (entry) entry.lastSeen = Date.now();
+      // 心跳视为在线确认：必要时自动补注册
+      this.#ensureSlaveOnline(identityText, identity, { touch: true });
       return;
     }
 
@@ -619,6 +619,9 @@ export class ZNL extends EventEmitter {
           return;
         }
 
+        // 认证通过后允许补注册（避免 master 重启后丢失在线表）
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
+
         if (this.encrypted) {
           try {
             finalFrames = this.#openPayloadFrames(
@@ -635,6 +638,9 @@ export class ZNL extends EventEmitter {
             return;
           }
         }
+      } else {
+        // 明文模式同样补注册
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
       }
 
       const finalPayload = payloadFromFrames(finalFrames);
@@ -669,6 +675,9 @@ export class ZNL extends EventEmitter {
           return;
         }
 
+        // 认证通过后允许补注册（避免 master 重启后丢失在线表）
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
+
         if (this.encrypted) {
           try {
             finalFrames = this.#openPayloadFrames(
@@ -685,6 +694,9 @@ export class ZNL extends EventEmitter {
             return;
           }
         }
+      } else {
+        // 明文模式同样补注册
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
       }
 
       const finalPayload = payloadFromFrames(finalFrames);
@@ -1224,6 +1236,33 @@ export class ZNL extends EventEmitter {
       reason: String(reason ?? "认证失败"),
       encrypted: this.encrypted,
     });
+  }
+
+  /**
+   * master 侧确保某个 slave 已登记在线
+   * - 仅在认证通过后调用
+   * - 支持心跳/请求/响应等路径的自动补注册
+   *
+   * @param {string} identityText
+   * @param {Buffer|string|Uint8Array} identity
+   * @param {{ touch?: boolean }} [options]
+   */
+  #ensureSlaveOnline(identityText, identity, { touch = true } = {}) {
+    const id = String(identityText ?? "");
+    if (!id) return;
+
+    const now = Date.now();
+    const entry = this.#slaves.get(id);
+    if (entry) {
+      if (touch) entry.lastSeen = now;
+      return;
+    }
+
+    this.#slaves.set(id, {
+      identity: identityToBuffer(identity),
+      lastSeen: now,
+    });
+    this.emit("slave_connected", id);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
