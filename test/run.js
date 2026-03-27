@@ -57,6 +57,15 @@ const fmt = (p) => {
   return s.length > 60 ? `${s.slice(0, 57)}...` : s;
 };
 
+async function waitForSlave(master, slaveId, maxMs = 2000) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    if (master.slaves.includes(slaveId)) return true;
+    await delay(100);
+  }
+  return false;
+}
+
 class TestRunner {
   constructor() {
     this.passed = 0;
@@ -1402,6 +1411,9 @@ await runner.test("authKeyMap 优先级：命中 map 时不回退", async () => 
   await sPriRight.start();
   await delay(150);
 
+  const registered = await waitForSlave(mP, "sPri", 3000);
+  runner.assert(registered, `重连后注册成功 → ${mP.slaves}`);
+
   const r = await sPriRight.DEALER("ok", { timeoutMs: 1500 });
   runner.assert(toText(r) === "MP:ok", `map key 正常 → "${toText(r)}"`);
 
@@ -1462,14 +1474,7 @@ await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
   await sSw2.start();
   await delay(150);
 
-  let registered = false;
-  for (let i = 0; i < 20; i++) {
-    if (mS.slaves.includes("sSw")) {
-      registered = true;
-      break;
-    }
-    await delay(100);
-  }
+  const registered = await waitForSlave(mS, "sSw", 3000);
   runner.assert(registered, `重连后注册成功 → ${mS.slaves}`);
 
   const r2 = await sSw2.DEALER("after-reconnect", { timeoutMs: 1500 });
