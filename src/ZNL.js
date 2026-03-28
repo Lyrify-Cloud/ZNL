@@ -49,6 +49,7 @@ import {
   buildRegisterFrames,
   buildUnregisterFrames,
   buildHeartbeatFrames,
+  buildHeartbeatAckFrames,
   buildRequestFrames,
   buildResponseFrames,
   buildPublishFrames,
@@ -154,8 +155,23 @@ export class ZNL extends EventEmitter {
   /** 心跳间隔（ms），0 表示禁用；slave/master 共用同一配置 */
   #heartbeatInterval;
 
-  /** slave 侧发送心跳的定时器句柄 */
+  /** slave 侧单次心跳调度定时器句柄 */
   #heartbeatTimer = null;
+
+  /** slave 侧等待心跳应答的超时定时器句柄 */
+  #heartbeatAckTimer = null;
+
+  /** slave 侧当前是否存在未确认的心跳 */
+  #heartbeatWaitingAck = false;
+
+  /** slave 侧最近一次确认主节点在线的时间戳 */
+  #lastMasterSeenAt = 0;
+
+  /** slave 侧缓存的主节点在线状态 */
+  #masterOnline = false;
+
+  /** slave 侧正在进行的 Dealer 重连 Promise（防止并发重连） */
+  #dealerReconnectPromise = null;
 
   /** master 侧扫描死节点的定时器句柄 */
   #heartbeatCheckTimer = null;
@@ -467,6 +483,27 @@ export class ZNL extends EventEmitter {
   }
 
   /**
+   * 【Slave 侧】当前已确认的主节点在线状态
+   * - 仅在 slave 角色下有意义
+   * - 收到合法 heartbeat_ack / request / response / publish 时置为 true
+   * - 心跳应答超时、重连、stop 时置为 false
+   */
+  get masterOnline() {
+    return this.role === "slave" ? this.#masterOnline : false;
+  }
+
+  /**
+   * 【Slave 侧】查询当前主节点是否在线
+   * 说明：
+   * - 这是对外公开的轻量 API，适合业务层主动轮询
+   * - 返回值基于最近一次链路确认结果，而非一次实时网络探测
+   * @returns {boolean}
+   */
+  isMasterOnline() {
+    return this.masterOnline;
+  }
+
+  /**
    * 【Master 侧】动态添加/更新某个 slave 的 authKey（立即生效）
    * @param {string} slaveId
    * @param {string} authKey
@@ -549,8 +586,13 @@ export class ZNL extends EventEmitter {
    */
   async #doStop() {
     if (this.role === "slave" && this.#sockets.dealer) {
-      clearInterval(this.#heartbeatTimer);
+      clearTimeout(this.#heartbeatTimer);
+      clearTimeout(this.#heartbeatAckTimer);
       this.#heartbeatTimer = null;
+      this.#heartbeatAckTimer = null;
+      this.#heartbeatWaitingAck = false;
+      this.#masterOnline = false;
+      this.#lastMasterSeenAt = 0;
 
       await this.#sendQueue
         .enqueue("dealer", () =>
@@ -569,9 +611,11 @@ export class ZNL extends EventEmitter {
    * 顺序：停止定时器 → 关闭 socket → 等待读循环退出 → 清空所有注册表
    */
   async #teardown() {
-    clearInterval(this.#heartbeatTimer);
+    clearTimeout(this.#heartbeatTimer);
+    clearTimeout(this.#heartbeatAckTimer);
     clearInterval(this.#heartbeatCheckTimer);
     this.#heartbeatTimer = null;
+    this.#heartbeatAckTimer = null;
     this.#heartbeatCheckTimer = null;
 
     for (const socket of Object.values(this.#sockets)) {
@@ -587,6 +631,10 @@ export class ZNL extends EventEmitter {
     this.#slaves.clear();
     this.#slaveKeyCache.clear();
     this.#masterNodeId = null;
+    this.#masterOnline = false;
+    this.#lastMasterSeenAt = 0;
+    this.#heartbeatWaitingAck = false;
+    this.#dealerReconnectPromise = null;
     this.#replayGuard.clear();
   }
 
@@ -611,23 +659,17 @@ export class ZNL extends EventEmitter {
    * 连接后立即发送注册帧，再启动心跳定时器
    */
   async #startSlaveSockets() {
-    const dealer = new zmq.Dealer({ routingId: this.id });
-    dealer.connect(this.endpoints.router);
+    this.#masterOnline = false;
+    this.#lastMasterSeenAt = 0;
+    this.#heartbeatWaitingAck = false;
+
+    const dealer = this.#createDealerSocket();
     this.#sockets.dealer = dealer;
 
-    this.#consume(dealer, (frames) => this.#handleDealerFrames(frames));
-
-    // 注册帧：
-    // - encrypted=true  : 发送签名证明令牌（放在 authKey 字段位）
-    // - encrypted=false : 不携带认证信息
-    const registerToken = this.#secureEnabled
-      ? this.#createAuthProof("register", "", [])
-      : "";
-
-    await this.#sendQueue.enqueue("dealer", () =>
-      dealer.send(buildRegisterFrames(registerToken)),
-    );
-
+    // 注册帧改为“尽力发送”：
+    // - master 尚未上线时无需阻塞启动流程
+    // - 后续 heartbeat_ack 成功后仍可自然恢复在线状态
+    this.#trySendRegister();
     this.#startHeartbeat();
   }
 
@@ -654,6 +696,8 @@ export class ZNL extends EventEmitter {
 
     // ── 心跳 ────────────────────────────────────────────────────────────────
     if (parsed.kind === "heartbeat") {
+      let ackFrames = buildHeartbeatAckFrames();
+
       if (this.#secureEnabled) {
         const keys = this.#resolveSlaveKeys(identityText);
         if (!keys) {
@@ -682,11 +726,20 @@ export class ZNL extends EventEmitter {
           signKey: keys.signKey,
           encryptKey: keys.encryptKey,
         });
-        return;
+
+        ackFrames = buildHeartbeatAckFrames(
+          this.#createAuthProof("heartbeat_ack", "", [], keys.signKey),
+        );
+      } else {
+        // 心跳视为在线确认：必要时自动补注册
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
       }
 
-      // 心跳视为在线确认：必要时自动补注册
-      this.#ensureSlaveOnline(identityText, identity, { touch: true });
+      await this.#sendQueue
+        .enqueue("router", () =>
+          this.#sockets.router.send([identityToBuffer(identity), ...ackFrames]),
+        )
+        .catch(() => {});
       return;
     }
 
@@ -886,6 +939,28 @@ export class ZNL extends EventEmitter {
 
     const event = this.#buildAndEmit("dealer", frames, { payload, ...parsed });
 
+    // ── 心跳应答：master -> slave ──────────────────────────────────────────
+    if (parsed.kind === "heartbeat_ack") {
+      if (this.#secureEnabled) {
+        const v = this.#verifyIncomingProof({
+          kind: "heartbeat_ack",
+          proofToken: parsed.authProof,
+          requestId: "",
+          payloadFrames: [],
+          expectedNodeId: this.#masterNodeId,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        if (!this.#masterNodeId) this.#masterNodeId = v.envelope.nodeId;
+      }
+
+      this.#confirmMasterReachable({ scheduleNextHeartbeat: true });
+      return;
+    }
+
     // ── PUB 广播：master -> slave ──────────────────────────────────────────
     if (parsed.kind === "publish") {
       let finalFrames = parsed.payloadFrames;
@@ -923,6 +998,8 @@ export class ZNL extends EventEmitter {
           }
         }
       }
+
+      this.#confirmMasterReachable({ scheduleNextHeartbeat: true });
 
       const finalPayload = payloadFromFrames(finalFrames);
       const pubEvent = { topic: parsed.topic, payload: finalPayload };
@@ -977,6 +1054,8 @@ export class ZNL extends EventEmitter {
         }
       }
 
+      this.#confirmMasterReachable({ scheduleNextHeartbeat: true });
+
       const finalPayload = payloadFromFrames(finalFrames);
       const requestEvent = { ...event, payload: finalPayload };
       this.emit("request", requestEvent);
@@ -1028,6 +1107,8 @@ export class ZNL extends EventEmitter {
           }
         }
       }
+
+      this.#confirmMasterReachable({ scheduleNextHeartbeat: true });
 
       const finalPayload = payloadFromFrames(finalFrames);
       const responseEvent = { ...event, payload: finalPayload };
@@ -1194,27 +1275,235 @@ export class ZNL extends EventEmitter {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * 启动 slave 侧心跳发送定时器
+   * 创建并初始化 slave 侧 Dealer socket
+   * 设计要点：
+   * - immediate=true：仅向已完成连接的 pipe 发送，避免离线期间无限积压旧消息
+   * - linger=0     ：关闭旧 socket 时直接丢弃残留发送队列，避免旧心跳回灌
+   * - sendTimeout=0：尽力发送，当前不可发时立即失败，不阻塞重连/启动流程
+   *
+   * @returns {import("zeromq").Dealer}
+   */
+  #createDealerSocket() {
+    const dealer = new zmq.Dealer({
+      routingId: this.id,
+      immediate: true,
+      linger: 0,
+      sendTimeout: 0,
+      reconnectInterval: 200,
+      reconnectMaxInterval: 1000,
+    });
+
+    dealer.connect(this.endpoints.router);
+    this.#consume(dealer, (frames) => this.#handleDealerFrames(frames));
+    return dealer;
+  }
+
+  /**
+   * 尝试发送注册帧
+   * 说明：
+   * - 该操作是“尽力发送”，不阻塞启动流程
+   * - master 未上线时允许静默失败，由后续 heartbeat_ack 驱动恢复
+   */
+  #trySendRegister() {
+    if (this.role !== "slave" || !this.running || !this.#sockets.dealer) return;
+
+    const registerToken = this.#secureEnabled
+      ? this.#createAuthProof("register", "", [])
+      : "";
+
+    this.#sendQueue
+      .enqueue("dealer", () =>
+        this.#sockets.dealer.send(buildRegisterFrames(registerToken)),
+      )
+      .catch(() => {});
+  }
+
+  /**
+   * 标记主节点已确认在线
+   */
+  #markMasterOnline() {
+    this.#masterOnline = true;
+    this.#lastMasterSeenAt = Date.now();
+  }
+
+  /**
+   * 标记主节点离线，并清理当前等待中的心跳状态
+   */
+  #markMasterOffline() {
+    this.#masterOnline = false;
+    this.#lastMasterSeenAt = 0;
+    this.#heartbeatWaitingAck = false;
+    clearTimeout(this.#heartbeatAckTimer);
+    this.#heartbeatAckTimer = null;
+  }
+
+  /**
+   * 确认链路已打通
+   * - heartbeat_ack 是最直接的确认信号
+   * - 其他来自 master 的合法业务帧同样证明链路可达
+   *
+   * @param {{ scheduleNextHeartbeat?: boolean }} [options]
+   */
+  #confirmMasterReachable({ scheduleNextHeartbeat = false } = {}) {
+    this.#markMasterOnline();
+
+    if (!this.#heartbeatWaitingAck) return;
+
+    this.#heartbeatWaitingAck = false;
+    clearTimeout(this.#heartbeatAckTimer);
+    this.#heartbeatAckTimer = null;
+
+    if (scheduleNextHeartbeat && this.#heartbeatInterval > 0) {
+      this.#scheduleNextHeartbeat();
+    }
+  }
+
+  /**
+   * 计算心跳应答超时时间
+   * - 优先复用用户配置的 heartbeatTimeoutMs
+   * - 未配置时回退到 interval × 2，且至少 1000ms
+   */
+  #resolveHeartbeatAckTimeoutMs() {
+    if (this.#heartbeatTimeoutMs > 0) return this.#heartbeatTimeoutMs;
+    return Math.max(this.#heartbeatInterval * 2, 1000);
+  }
+
+  /**
+   * 调度下一次心跳发送（单飞模式）
+   * - 任意时刻最多只允许一个未确认心跳在飞
+   * - 只有收到 heartbeat_ack 或其他合法回流后，才会进入下一轮
+   *
+   * @param {number} [delayMs=this.#heartbeatInterval]
+   */
+  #scheduleNextHeartbeat(delayMs = this.#heartbeatInterval) {
+    clearTimeout(this.#heartbeatTimer);
+    this.#heartbeatTimer = setTimeout(
+      () => {
+        this.#sendHeartbeatOnce().catch((error) => this.emit("error", error));
+      },
+      Math.max(0, Number(delayMs) || 0),
+    );
+  }
+
+  /**
+   * 启动 slave 侧心跳发送流程
+   * 实现方式：
+   * - 启动时立即发送第一帧心跳
+   * - 后续改为“发一条 → 等应答 → 再调度下一条”
    */
   #startHeartbeat() {
-    if (this.#heartbeatInterval <= 0) return;
+    if (this.role !== "slave" || this.#heartbeatInterval <= 0) return;
 
-    this.#heartbeatTimer = setInterval(() => {
-      if (!this.running || !this.#sockets.dealer) return;
+    this.#heartbeatWaitingAck = false;
+    clearTimeout(this.#heartbeatAckTimer);
+    this.#heartbeatAckTimer = null;
+    this.#scheduleNextHeartbeat(0);
+  }
 
-      const proof = this.#secureEnabled
-        ? this.#createAuthProof("heartbeat", "", [])
-        : "";
+  /**
+   * 发送单次心跳，并进入等待应答状态
+   */
+  async #sendHeartbeatOnce() {
+    if (
+      !this.running ||
+      this.role !== "slave" ||
+      this.#heartbeatInterval <= 0 ||
+      !this.#sockets.dealer ||
+      this.#heartbeatWaitingAck
+    ) {
+      return;
+    }
 
-      // plain 模式仍保持历史帧结构 [CONTROL_PREFIX, CONTROL_HEARTBEAT]
-      const frames = this.#secureEnabled
-        ? buildHeartbeatFrames(proof)
-        : [CONTROL_PREFIX, CONTROL_HEARTBEAT];
+    const proof = this.#secureEnabled
+      ? this.#createAuthProof("heartbeat", "", [])
+      : "";
 
-      this.#sendQueue
-        .enqueue("dealer", () => this.#sockets.dealer.send(frames))
-        .catch(() => {});
-    }, this.#heartbeatInterval);
+    // plain 模式仍保持历史帧结构 [CONTROL_PREFIX, CONTROL_HEARTBEAT]
+    const frames = this.#secureEnabled
+      ? buildHeartbeatFrames(proof)
+      : [CONTROL_PREFIX, CONTROL_HEARTBEAT];
+
+    this.#heartbeatWaitingAck = true;
+    clearTimeout(this.#heartbeatAckTimer);
+    this.#heartbeatAckTimer = setTimeout(() => {
+      this.#onHeartbeatAckTimeout();
+    }, this.#resolveHeartbeatAckTimeoutMs());
+
+    try {
+      await this.#sendQueue.enqueue("dealer", () =>
+        this.#sockets.dealer.send(frames),
+      );
+    } catch {
+      this.#onHeartbeatAckTimeout();
+    }
+  }
+
+  /**
+   * 心跳应答超时处理：
+   * - 将主节点状态置为离线
+   * - 主动重建 Dealer，丢弃旧连接残留消息
+   */
+  #onHeartbeatAckTimeout() {
+    if (!this.running || this.role !== "slave" || !this.#heartbeatWaitingAck) {
+      return;
+    }
+
+    this.#markMasterOffline();
+    this.#restartDealer("heartbeat_ack_timeout").catch((error) =>
+      this.emit("error", error),
+    );
+  }
+
+  /**
+   * 重建 slave 侧 Dealer 连接
+   * 设计目标：
+   * - 避免 master 重启后旧 socket 中残留的心跳/请求继续回灌
+   * - 将重连控制为单次串行过程，避免并发 close/connect 造成状态抖动
+   *
+   * @param {string} reason
+   * @returns {Promise<void>}
+   */
+  async #restartDealer(reason = "reconnect") {
+    if (this.role !== "slave" || !this.running) return;
+    if (this.#dealerReconnectPromise) return this.#dealerReconnectPromise;
+
+    this.#dealerReconnectPromise = (async () => {
+      clearTimeout(this.#heartbeatTimer);
+      clearTimeout(this.#heartbeatAckTimer);
+      this.#heartbeatTimer = null;
+      this.#heartbeatAckTimer = null;
+      this.#heartbeatWaitingAck = false;
+      this.#masterOnline = false;
+      this.#lastMasterSeenAt = 0;
+
+      this.#pending.rejectAll(
+        new Error(
+          `与主节点的连接已重建（reason=${String(reason)}），待处理请求已取消。`,
+        ),
+      );
+
+      const oldDealer = this.#sockets.dealer;
+      delete this.#sockets.dealer;
+
+      // slave 侧发送队列只服务 dealer，重建时直接清空可避免旧任务继续写入旧 socket
+      this.#sendQueue.clear();
+
+      if (oldDealer) {
+        try {
+          oldDealer.close();
+        } catch {}
+      }
+
+      const dealer = this.#createDealerSocket();
+      this.#sockets.dealer = dealer;
+
+      this.#trySendRegister();
+      this.#startHeartbeat();
+    })().finally(() => {
+      this.#dealerReconnectPromise = null;
+    });
+
+    return this.#dealerReconnectPromise;
   }
 
   /**
@@ -1247,7 +1536,7 @@ export class ZNL extends EventEmitter {
   /**
    * 生成签名证明令牌
    *
-   * @param {"register"|"heartbeat"|"request"|"response"|"publish"} kind
+   * @param {"register"|"heartbeat"|"heartbeat_ack"|"request"|"response"|"publish"} kind
    * @param {string} requestId
    * @param {Buffer[]} payloadFrames
    * @returns {string}
@@ -1278,7 +1567,7 @@ export class ZNL extends EventEmitter {
    * 校验入站签名证明 + 防重放 + 摘要一致性
    *
    * @param {{
-   *   kind: "register"|"heartbeat"|"request"|"response"|"publish",
+   *   kind: "register"|"heartbeat"|"heartbeat_ack"|"request"|"response"|"publish",
    *   proofToken: string|null,
    *   requestId: string|null,
    *   payloadFrames: Buffer[],

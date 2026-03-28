@@ -23,7 +23,9 @@
  * 19) authKeyMap：动态 add/remove 立即生效
  * 20) SendQueue 顺序：master→slave 顺序保持
  * 21) PendingManager：key 含 identity 避免碰撞
- * 22) 输出结构：分组、统一格式、汇总统计
+ * 22) 外部 API：slave 侧 masterOnline / isMasterOnline 状态正确
+ * 23) 心跳应答：heartbeat_ack 驱动单飞心跳与主节点恢复
+ * 24) 输出结构：分组、统一格式、汇总统计
  */
 
 import * as zmq from "zeromq";
@@ -947,6 +949,169 @@ await runner.test("master 重启后 slave 自动补注册并恢复广播", async
   await s9.stop();
   await m9b.stop();
 });
+
+await runner.test(
+  "slave 侧外部 API：masterOnline / isMasterOnline 状态正确",
+  async () => {
+    const EP_ONLINE = "tcp://127.0.0.1:16030";
+
+    const mOnline = new ZNL({
+      role: "master",
+      id: "m-online",
+      endpoints: { router: EP_ONLINE },
+      heartbeatInterval: scaleMs(120),
+      heartbeatTimeoutMs: scaleMs(240),
+    });
+    const sOnline = new ZNL({
+      role: "slave",
+      id: "s-online",
+      endpoints: { router: EP_ONLINE },
+      heartbeatInterval: scaleMs(120),
+      heartbeatTimeoutMs: scaleMs(240),
+    });
+
+    runner.assert(
+      sOnline.masterOnline === false,
+      "启动前 masterOnline 默认为 false",
+    );
+    runner.assert(
+      sOnline.isMasterOnline() === false,
+      "启动前 isMasterOnline() 默认为 false",
+    );
+
+    await mOnline.start();
+    await sOnline.start();
+
+    let becameOnline = false;
+    for (let i = 0; i < 20; i++) {
+      if (sOnline.masterOnline && sOnline.isMasterOnline()) {
+        becameOnline = true;
+        break;
+      }
+      await delay(100);
+    }
+
+    runner.assert(becameOnline, "收到 heartbeat_ack 后主节点状态变为在线");
+    runner.assert(sOnline.masterOnline === true, "masterOnline 属性为 true");
+    runner.assert(
+      sOnline.isMasterOnline() === true,
+      "isMasterOnline() 返回 true",
+    );
+
+    await mOnline.stop();
+
+    let becameOffline = false;
+    for (let i = 0; i < 25; i++) {
+      if (!sOnline.masterOnline && !sOnline.isMasterOnline()) {
+        becameOffline = true;
+        break;
+      }
+      await delay(100);
+    }
+
+    runner.assert(becameOffline, "心跳应答超时后主节点状态变为离线");
+    runner.assert(
+      sOnline.masterOnline === false,
+      "masterOnline 属性恢复为 false",
+    );
+    runner.assert(
+      sOnline.isMasterOnline() === false,
+      "isMasterOnline() 返回 false",
+    );
+
+    await sOnline.stop();
+  },
+);
+
+await runner.test(
+  "heartbeat_ack：master 重启后 slave 自动恢复在线并恢复 RPC",
+  async () => {
+    const EP_HB_ACK = "tcp://127.0.0.1:16031";
+
+    const mAck1 = new ZNL({
+      role: "master",
+      id: "m-ack-1",
+      endpoints: { router: EP_HB_ACK },
+      heartbeatInterval: scaleMs(120),
+      heartbeatTimeoutMs: scaleMs(240),
+    });
+    const sAck = new ZNL({
+      role: "slave",
+      id: "s-ack",
+      endpoints: { router: EP_HB_ACK },
+      heartbeatInterval: scaleMs(120),
+      heartbeatTimeoutMs: scaleMs(240),
+    });
+
+    await mAck1.ROUTER(async ({ payload }) => `ack-1:${toText(payload)}`);
+    await mAck1.start();
+    await sAck.start();
+
+    let online1 = false;
+    for (let i = 0; i < 20; i++) {
+      if (sAck.masterOnline) {
+        online1 = true;
+        break;
+      }
+      await delay(100);
+    }
+    runner.assert(online1, "首次 heartbeat_ack 建立在线状态");
+
+    const reply1 = await sAck.DEALER("ping-before-restart", {
+      timeoutMs: 1200,
+    });
+    runner.assert(
+      toText(reply1) === "ack-1:ping-before-restart",
+      `重启前 RPC 正常 → "${toText(reply1)}"`,
+    );
+
+    await mAck1.stop();
+
+    let offline = false;
+    for (let i = 0; i < 25; i++) {
+      if (!sAck.masterOnline) {
+        offline = true;
+        break;
+      }
+      await delay(100);
+    }
+    runner.assert(offline, "master 下线后 slave 能感知离线");
+
+    const mAck2 = new ZNL({
+      role: "master",
+      id: "m-ack-2",
+      endpoints: { router: EP_HB_ACK },
+      heartbeatInterval: scaleMs(120),
+      heartbeatTimeoutMs: scaleMs(240),
+    });
+    await mAck2.ROUTER(async ({ payload }) => `ack-2:${toText(payload)}`);
+    await mAck2.start();
+
+    let reOnline = false;
+    for (let i = 0; i < 30; i++) {
+      if (sAck.masterOnline && mAck2.slaves.includes("s-ack")) {
+        reOnline = true;
+        break;
+      }
+      await delay(100);
+    }
+
+    runner.assert(reOnline, `重启后重新在线成功 → ${mAck2.slaves}`);
+    runner.assert(
+      sAck.isMasterOnline() === true,
+      "重启后 isMasterOnline() 返回 true",
+    );
+
+    const reply2 = await sAck.DEALER("ping-after-restart", { timeoutMs: 1500 });
+    runner.assert(
+      toText(reply2) === "ack-2:ping-after-restart",
+      `重启后 RPC 恢复正常 → "${toText(reply2)}"`,
+    );
+
+    await sAck.stop();
+    await mAck2.stop();
+  },
+);
 
 // ══════════════════════════════════════════════════════════
 //  心跳

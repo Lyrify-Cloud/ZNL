@@ -4,11 +4,13 @@
  * 负责所有帧的构建与解析，全部为纯函数，无副作用。
  *
  * 控制帧格式：
- *   注册帧：  [PREFIX, "register", (AUTH_MARKER, authKey)?]
- *   注销帧：  [PREFIX, "unregister"]
- *   请求帧：  [PREFIX, "req", requestId, (AUTH_MARKER, authKey)?, ...payload]
- *   响应帧：  [PREFIX, "res", requestId, ...payload]
- *   广播帧：  [PREFIX, "pub", topic, ...payload]
+ *   注册帧：     [PREFIX, "register", (AUTH_MARKER, authKey)?]
+ *   注销帧：     [PREFIX, "unregister"]
+ *   心跳帧：     [PREFIX, "heartbeat", (AUTH_MARKER, authProof)?]
+ *   心跳应答帧： [PREFIX, "heartbeat_ack", (AUTH_MARKER, authProof)?]
+ *   请求帧：     [PREFIX, "req", requestId, (AUTH_MARKER, authKey)?, ...payload]
+ *   响应帧：     [PREFIX, "res", requestId, ...payload]
+ *   广播帧：     [PREFIX, "pub", topic, ...payload]
  *   Router 侧额外在最前面加一帧：[identity, ...]
  */
 
@@ -21,6 +23,7 @@ import {
   CONTROL_UNREGISTER,
   CONTROL_PUB,
   CONTROL_HEARTBEAT,
+  CONTROL_HEARTBEAT_ACK,
   EMPTY_BUFFER,
 } from "./constants.js";
 
@@ -180,22 +183,37 @@ export function buildHeartbeatFrames(authProof = "") {
   return frames;
 }
 
+/**
+ * 构建心跳应答控制帧数组（master → slave）
+ * 帧结构：[PREFIX, "heartbeat_ack", (AUTH_MARKER, authProof)?]
+ *
+ * @param {string} [authProof] - 可选认证证明
+ * @returns {Array}
+ */
+export function buildHeartbeatAckFrames(authProof = "") {
+  const frames = [CONTROL_PREFIX, CONTROL_HEARTBEAT_ACK];
+  if (authProof) frames.push(CONTROL_AUTH, authProof);
+  return frames;
+}
+
 // ─── 帧解析 ───────────────────────────────────────────────────────────────────
 
 /**
  * 解析 ZMQ 原始帧，识别控制帧并提取语义字段
  *
  * 返回 kind 说明：
- * - "register"   → slave 上线注册（携带可选 authKey）
- * - "unregister" → slave 主动下线注销
- * - "publish"    → master 广播消息（携带 topic）
- * - "request"    → 对端主动发起的 RPC 请求
- * - "response"   → 对端返回的 RPC 响应（匹配 pending 请求）
- * - "message"    → 非控制帧，普通消息透传
+ * - "register"      → slave 上线注册（携带可选 authKey）
+ * - "unregister"    → slave 主动下线注销
+ * - "heartbeat"     → slave 发起保活心跳
+ * - "heartbeat_ack" → master 返回心跳应答
+ * - "publish"       → master 广播消息（携带 topic）
+ * - "request"       → 对端主动发起的 RPC 请求
+ * - "response"      → 对端返回的 RPC 响应（匹配 pending 请求）
+ * - "message"       → 非控制帧，普通消息透传
  *
  * @param {Array} frames - 不含 identity 帧的帧数组
  * @returns {{
- *   kind         : "register"|"unregister"|"heartbeat"|"publish"|"request"|"response"|"message",
+ *   kind         : "register"|"unregister"|"heartbeat"|"heartbeat_ack"|"publish"|"request"|"response"|"message",
  *   requestId    : string|null,
  *   authKey      : string|null,
  *   authProof    : string|null,
@@ -255,6 +273,23 @@ export function parseControlFrames(frames) {
 
     return {
       kind: "heartbeat",
+      requestId: null,
+      authKey: null,
+      authProof,
+      topic: null,
+      payloadFrames: [],
+    };
+  }
+
+  // ── 心跳应答帧：[PREFIX, "heartbeat_ack"] ─────────────────────────────────
+  if (action === CONTROL_HEARTBEAT_ACK) {
+    let authProof = null;
+    if (frames.length >= 4 && frames[2]?.toString() === CONTROL_AUTH) {
+      authProof = frames[3]?.toString() ?? "";
+    }
+
+    return {
+      kind: "heartbeat_ack",
       requestId: null,
       authKey: null,
       authProof,

@@ -7,6 +7,7 @@
  *  3. 每 5  秒广播 "news"   topic（模拟新闻推送）
  *  4. 每 15 秒广播 "system" topic（模拟系统通知）
  *  5. 每 7  秒主动向 slave-001 发送 RPC ping
+ *  6. 示例日志说明：slave 侧现通过 heartbeat_ack 确认 master 在线
  */
 
 import { ZNL } from "../../index.js";
@@ -78,7 +79,10 @@ master.on("auth_failed", ({ identityText, reason }) => {
 
 await master.start();
 console.log("[MASTER] 已启动，监听 tcp://127.0.0.1:6003");
-console.log("[MASTER] 等待 slave 连接...\n");
+console.log("[MASTER] 等待 slave 连接...");
+console.log(
+  "[MASTER] 提示：slave 侧会先等待 heartbeat_ack 确认主节点在线，再发送启动问候与后续业务请求\n",
+);
 
 // ─── 定时广播：news topic（每 5 秒）──────────────────────────────────────────
 
@@ -116,7 +120,10 @@ const pingTimer = setInterval(async () => {
     });
     console.log(`[MASTER][RPC →] slave-001 回复: "${toText(reply)}"`);
   } catch (error) {
-    console.error("[MASTER][RPC → 失败]", error?.message ?? error);
+    console.error(
+      "[MASTER][RPC → 失败] 可能原因：slave 尚未确认主节点在线、正在重连，或当前请求超时",
+      error?.message ?? error,
+    );
   }
 }, 7000);
 

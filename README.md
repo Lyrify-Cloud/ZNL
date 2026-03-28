@@ -6,6 +6,8 @@
 
 - 基于 `ROUTER/DEALER` 同时实现 RPC 请求-响应与 PUB/SUB 广播，一套连接两种模式
 - 自动处理并发消息匹配、自动处理心跳包、超时控制、最大并发限制
+- 心跳采用 `heartbeat → heartbeat_ack` 单飞应答机制，避免主节点离线时旧心跳持续积压
+- Slave 对外提供主节点在线状态 API：`masterOnline` / `isMasterOnline()`
 - 支持 Master → Slave 主动发起请求（双向 RPC）
 - 基于 ROUTER 实现 PUB/SUB 广播，无需额外 socket 或端口
 - Slave 自动注册/注销，Master 实时感知在线节点
@@ -137,6 +139,7 @@ new ZNL({
 
 - `master`：绑定（bind）ROUTER socket
 - `slave`：连接（connect）DEALER socket，并自动向 master 发送注册帧
+- `slave`：启动单飞心跳流程，发送 `heartbeat` 后等待 `heartbeat_ack`，确认链路可达后再调度下一次心跳
 
 重复调用安全，若正在启动中则等待同一个 Promise。
 
@@ -172,6 +175,34 @@ new ZNL({
 **Master 侧调用：**
 
 - 移除某个 slave 的 authKey（立即生效），并触发 `slave_disconnected`
+
+### `masterOnline`
+
+**Slave 侧只读属性**，表示最近一次链路确认结果。
+
+说明：
+
+- `true`：最近收到合法的 `heartbeat_ack`，或收到来自 master 的合法业务帧
+- `false`：尚未建立有效链路、心跳应答超时、或节点已停止
+
+```js
+console.log(slave.masterOnline);
+```
+
+### `isMasterOnline()`
+
+**Slave 侧调用**，返回当前主节点在线状态。
+
+说明：
+
+- 这是一个轻量公开 API，适合业务层轮询
+- 返回的是最近一次链路确认状态，不会主动发起一次实时网络探测
+
+```js
+if (slave.isMasterOnline()) {
+  console.log("master 在线");
+}
+```
 
 ### `options.timeoutMs`
 
@@ -236,6 +267,11 @@ console.log(master.slaves); // ["slave-001", "slave-002"]
 | `slave_disconnected` | Master | slave 注销或发送失败下线，携带 `slaveId` |
 | `auth_failed` | Master / Slave | 认证失败（签名校验失败、重放检测失败、解密失败等），请求已被丢弃 |
 | `error` | 两者 | 内部错误 |
+
+> 心跳说明：
+> - Slave 发送 `heartbeat` 后，会等待 master 返回 `heartbeat_ack`
+> - 收到 `heartbeat_ack` 后才会调度下一次心跳，因此任意时刻最多只有一个未确认心跳在飞
+> - 若超过心跳应答超时仍未收到 `heartbeat_ack`，slave 会将 `masterOnline` 置为 `false`
 
 ## 本地示例
 

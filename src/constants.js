@@ -18,6 +18,9 @@ export const CONTROL_AUTH = "__znl_v1_auth__";
 /** slave 保活心跳帧标识符（slave → master，定时发送） */
 export const CONTROL_HEARTBEAT = "heartbeat";
 
+/** master 心跳应答帧标识符（master → slave，用于确认链路可达） */
+export const CONTROL_HEARTBEAT_ACK = "heartbeat_ack";
+
 /** slave 上线注册帧标识符（slave → master，start 时自动发送） */
 export const CONTROL_REGISTER = "register";
 

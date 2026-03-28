@@ -1,6 +1,6 @@
 {
   "name": "@lyrify/znl",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "ZNL - ZeroMQ Node Link",
   "type": "module",
   "main": "./index.js",
