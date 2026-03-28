@@ -1,24 +1,22 @@
 # ZNL
 
-基于 ZeroMQ `ROUTER/DEALER` 模式的 Node.js 通信库，提供开箱即用的双向 RPC 与 PUB/SUB 广播能力。
+基于 ZeroMQ `ROUTER / DEALER` 模式的 Node.js 通信库，提供双向 RPC、广播、在线状态感知，以及可选的签名认证与透明加密能力。
 
 ## 特性
 
-- 基于 `ROUTER/DEALER` 同时实现 RPC 请求-响应与 PUB/SUB 广播，一套连接两种模式
-- 自动处理并发消息匹配、自动处理心跳包、超时控制、最大并发限制
-- 心跳采用 `heartbeat → heartbeat_ack` 单飞应答机制，避免主节点离线时旧心跳持续积压
-- Slave 对外提供主节点在线状态 API：`masterOnline` / `isMasterOnline()`
-- 支持 Master → Slave 主动发起请求（双向 RPC）
-- 基于 ROUTER 实现 PUB/SUB 广播，无需额外 socket 或端口
-- Slave 自动注册/注销，Master 实时感知在线节点
-- 支持可选加密认证（签名 + 防重放 + AES-256-GCM 透明加密）
-- 加密开关 `encrypted`：
-  - `false`：明文模式（不签名/不加密）
-  - `true`：签名 + 防重放 + payload 透明加密（AES-256-GCM）
-- 可选关闭 payload 摘要校验（`enablePayloadDigest=false`）以提升性能
-  - 建议 master/slave 两端保持一致配置，避免认证不一致
-- `authKey` 或 `authKeyMap` 仅在 `encrypted=true` 时必填
-- `authKeyMap` 支持 master 按 `slaveId` 配置不同 key（未命中时会回退到 `authKey`）
+- 基于单连接实现双向 RPC 与广播
+- 支持 `Master -> Slave` 与 `Slave -> Master` 双向主动请求
+- `Slave` 自动注册 / 注销，`Master` 实时维护在线节点列表
+- 支持请求超时控制与最大并发限制
+- 心跳采用 `heartbeat -> heartbeat_ack` 应答机制
+- `Slave` 提供主节点在线状态查询 API：`masterOnline` / `isMasterOnline()`
+- 支持安全模式：
+  - HMAC 签名
+  - 时间戳校验
+  - nonce 防重放
+  - AES-256-GCM 透明加密
+  - 可选 payload 摘要校验
+- 支持 `authKeyMap`，允许 `Master` 按 `slaveId` 使用不同密钥
 - Payload 支持 `string`、`Buffer`、`Uint8Array` 及其数组（多帧）
 
 ## 安装
@@ -27,7 +25,7 @@
 pnpm add @lyrify/znl
 ```
 
-本地开发克隆仓库后：
+本地开发：
 
 ```bash
 pnpm install
@@ -35,7 +33,7 @@ pnpm install
 
 ## 快速开始
 
-### Master 节点
+### Master
 
 ```js
 import { ZNL } from "@lyrify/znl";
@@ -43,29 +41,36 @@ import { ZNL } from "@lyrify/znl";
 const master = new ZNL({
   role: "master",
   id: "master-1",
-  endpoints: { router: "tcp://127.0.0.1:6003" },
+  endpoints: {
+    router: "tcp://127.0.0.1:6003",
+  },
   authKey: "your-shared-key",
-  encrypted: true, // 推荐：透明加密 + 防重放
+  encrypted: true,
 });
 
-// RPC：自动回复 slave 的请求
+// 注册自动回复处理器
 master.ROUTER(async ({ identityText, payload }) => {
   const text = Buffer.isBuffer(payload) ? payload.toString() : String(payload);
   return `已收到来自 ${identityText} 的消息：${text}`;
 });
 
-// PUB/SUB：感知节点上下线
-master.on("slave_connected",    (id) => console.log(`${id} 上线，在线：${master.slaves}`));
-master.on("slave_disconnected", (id) => console.log(`${id} 下线，在线：${master.slaves}`));
+// 监听节点上下线
+master.on("slave_connected", (id) => {
+  console.log(`${id} 上线，当前在线：${master.slaves.join(", ")}`);
+});
+
+master.on("slave_disconnected", (id) => {
+  console.log(`${id} 下线，当前在线：${master.slaves.join(", ")}`);
+});
 
 await master.start();
 
-// PUB/SUB：广播消息（fire-and-forget）
+// 广播消息
 master.publish("news", "今日头条：ZNL 正式发布");
 master.publish("system", JSON.stringify({ status: "ok", time: Date.now() }));
 ```
 
-### Slave 节点
+### Slave
 
 ```js
 import { ZNL } from "@lyrify/znl";
@@ -73,26 +78,29 @@ import { ZNL } from "@lyrify/znl";
 const slave = new ZNL({
   role: "slave",
   id: "slave-001",
-  endpoints: { router: "tcp://127.0.0.1:6003" },
+  endpoints: {
+    router: "tcp://127.0.0.1:6003",
+  },
   authKey: "your-shared-key",
-  encrypted: true, // 需与 master 一致
+  encrypted: true,
 });
 
-// PUB/SUB：精确订阅（可在 start 前调用）
+// 订阅指定 topic
 slave.subscribe("news", ({ payload }) => {
   console.log("收到新闻：", payload.toString());
 });
 
-// PUB/SUB：兜底监听所有 topic
+// 兜底监听所有广播
 slave.on("publish", ({ topic, payload }) => {
   console.log(`[${topic}]`, payload.toString());
 });
 
 await slave.start();
 
-// RPC：向 master 发请求并等待响应
-const reply = await slave.DEALER("hello master", { timeoutMs: 4000 });
-console.log(reply.toString());
+if (slave.isMasterOnline()) {
+  const reply = await slave.DEALER("hello master", { timeoutMs: 4000 });
+  console.log(reply.toString());
+}
 ```
 
 ## 构造函数
@@ -116,87 +124,164 @@ new ZNL({
 });
 ```
 
+## 参数说明
+
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `role` | ✓ | 节点角色，`"master"` 或 `"slave"` |
-| `id` | ✓ | 节点唯一标识；slave 端同时作为 ZMQ `routingId` |
-| `endpoints.router` | | ROUTER 端点，默认 `tcp://127.0.0.1:6003` |
-| `maxPending` | | 最大并发 RPC 请求数，默认 `1000`；`0` 表示不限制 |
-| `authKey` | | 共享认证 Key；与 `authKeyMap` 二选一（`encrypted=true` 时至少提供一个） |
-| `authKeyMap` | | master 侧 slaveId → authKey 映射；未命中时回退到 `authKey` |
-| `heartbeatInterval` | | 心跳间隔（毫秒），默认 `3000`，`0` 表示禁用心跳 |
-| `heartbeatTimeoutMs` | | 心跳超时时间（毫秒），默认 `0` 表示使用 `heartbeatInterval × 3` |
-| `encrypted` | | 是否启用加密：`false`（默认，明文） / `true`（签名+防重放+透明加密） |
-| `enablePayloadDigest` | | 是否启用 payload 摘要校验，默认 `true`（关闭可提升性能） |
-| `maxTimeSkewMs` | | 时间戳最大允许偏移（毫秒），默认 `30000`，用于防重放校验 |
-| `replayWindowMs` | | nonce 重放缓存窗口（毫秒），默认 `120000` |
+| `id` | ✓ | 节点唯一标识；`slave` 侧同时作为 ZMQ `routingId` |
+| `endpoints.router` |  | ROUTER 端点，默认 `tcp://127.0.0.1:6003` |
+| `maxPending` |  | 最大并发 RPC 请求数，默认 `1000`；`0` 表示不限制 |
+| `authKey` |  | 共享认证 Key；与 `authKeyMap` 二选一（`encrypted=true` 时至少提供一个） |
+| `authKeyMap` |  | `master` 侧 `slaveId -> authKey` 映射；未命中时回退到 `authKey` |
+| `heartbeatInterval` |  | 心跳间隔（毫秒），默认 `3000`；`0` 表示禁用心跳 |
+| `heartbeatTimeoutMs` |  | 心跳超时时间（毫秒），默认 `0` 表示使用 `heartbeatInterval × 3` |
+| `encrypted` |  | 是否启用安全模式：`false`（默认，明文） / `true`（签名、防重放、透明加密） |
+| `enablePayloadDigest` |  | 是否启用 payload 摘要校验，默认 `true`；关闭可提升性能 |
+| `maxTimeSkewMs` |  | 时间戳最大允许偏移（毫秒），默认 `30000` |
+| `replayWindowMs` |  | nonce 重放缓存窗口（毫秒），默认 `120000` |
+
+## 使用建议
+
+- `master` 与 `slave` 两端应保持一致的 `encrypted` 配置
+- 若使用 `enablePayloadDigest=false`，两端也应保持一致
+- `encrypted=true` 时必须提供非空 `authKey`，或在 `master` 侧提供 `authKeyMap`
 
 ## API
 
-### `start()`
+### 生命周期
 
-启动节点：
+#### `start()`
 
-- `master`：绑定（bind）ROUTER socket
-- `slave`：连接（connect）DEALER socket，并自动向 master 发送注册帧
-- `slave`：启动单飞心跳流程，发送 `heartbeat` 后等待 `heartbeat_ack`，确认链路可达后再调度下一次心跳
+启动节点。
 
-重复调用安全，若正在启动中则等待同一个 Promise。
+`master` 侧：
 
-### `stop()`
+- 绑定 ROUTER socket
+- 启动在线节点心跳检测
 
-停止节点：
+`slave` 侧：
 
-- `slave`：先向 master 发送注销帧，再关闭 socket
-- `master`：清空在线节点表，关闭 socket，立即 reject 所有 pending RPC 请求
+- 连接 DEALER socket
+- 自动尝试发送注册帧
+- 启动心跳流程
+- 发送 `heartbeat` 后等待 `heartbeat_ack`
+- 收到 `heartbeat_ack` 后调度下一次心跳
 
-### `DEALER(payloadOrHandler, options?)`
+#### `stop()`
 
-**Slave 侧调用：**
+停止节点。
 
-- `payloadOrHandler` 为 payload 时：向 Master 发送 RPC 请求并等待响应，返回 `Promise<Buffer | Array>`
-- `payloadOrHandler` 为函数时：注册 slave 侧自动回复处理器（Master 主动发来 RPC 请求时触发）
+`slave` 侧：
 
-### `ROUTER(identityOrHandler, payload?, options?)`
+- 停止心跳
+- 发送注销帧
+- 关闭 socket
 
-**Master 侧调用：**
+`master` 侧：
 
-- `identityOrHandler` 为函数时：注册 master 侧自动回复处理器（Slave 发来 RPC 请求时触发）
-- `identityOrHandler` 为 identity（slave ID）时：Master 主动向指定 Slave 发送 RPC 请求并等待响应，返回 `Promise<Buffer | Array>`
+- 清空在线节点表
+- 关闭 socket
+- reject 所有 pending RPC 请求
 
-### `addAuthKey(slaveId, authKey)`
+### 双向 RPC
 
-**Master 侧调用：**
+#### `DEALER(payloadOrHandler, options?)`
 
-- 动态添加/更新某个 slave 的 authKey（立即生效）
+仅 `slave` 侧使用。
 
-### `removeAuthKey(slaveId)`
+- 当 `payloadOrHandler` 为 payload 时，向 `Master` 发起 RPC 请求，返回 `Promise<Buffer | Array>`
+- 当 `payloadOrHandler` 为函数时，注册 `slave` 侧自动回复处理器，用于处理 `Master` 主动发来的请求
 
-**Master 侧调用：**
+#### `ROUTER(identityOrHandler, payload?, options?)`
 
-- 移除某个 slave 的 authKey（立即生效），并触发 `slave_disconnected`
+仅 `master` 侧使用。
 
-### `masterOnline`
+- 当 `identityOrHandler` 为函数时，注册 `master` 侧自动回复处理器，用于处理 `Slave` 发来的请求
+- 当 `identityOrHandler` 为某个 `slaveId` 时，`Master` 主动向指定 `Slave` 发起 RPC 请求，返回 `Promise<Buffer | Array>`
 
-**Slave 侧只读属性**，表示最近一次链路确认结果。
+#### `options.timeoutMs`
 
-说明：
+单次 RPC 请求超时时间，默认 `5000` 毫秒。
 
-- `true`：最近收到合法的 `heartbeat_ack`，或收到来自 master 的合法业务帧
+### 广播与订阅
+
+#### `publish(topic, payload)`
+
+仅 `master` 侧使用。
+
+向所有当前在线的 `slave` 广播消息（fire-and-forget，无需 `await`）。
+
+- `topic`：消息主题
+- `payload`：支持 `string`、`Buffer`、`Uint8Array` 或其数组
+- 若某个 `slave` 发送失败，会自动将其移出在线列表并触发 `slave_disconnected`
+
+```js
+master.publish("news", "breaking news!");
+master.publish("metrics", JSON.stringify({ cpu: 0.42 }));
+```
+
+#### `subscribe(topic, handler)`
+
+仅 `slave` 侧使用。
+
+订阅指定 topic。
+
+- 可在 `start()` 前后调用
+- 订阅关系跨 `stop()/start()` 周期保留
+- 同一 topic 重复订阅会覆盖旧 handler
+- 返回 `this`，支持链式调用
+
+```js
+slave
+  .subscribe("news", ({ topic, payload }) => {
+    // ...
+  })
+  .subscribe("metrics", ({ topic, payload }) => {
+    // ...
+  });
+```
+
+#### `unsubscribe(topic)`
+
+仅 `slave` 侧使用。
+
+取消订阅指定 topic。
+
+```js
+slave.unsubscribe("news");
+```
+
+### 在线状态与节点管理
+
+#### `slaves`
+
+仅 `master` 侧只读属性。
+
+返回当前所有在线 `slaveId` 的快照数组。
+
+```js
+console.log(master.slaves);
+```
+
+#### `masterOnline`
+
+仅 `slave` 侧只读属性。
+
+表示最近一次链路确认结果。
+
+- `true`：最近收到合法的 `heartbeat_ack`，或收到来自 `master` 的合法业务帧
 - `false`：尚未建立有效链路、心跳应答超时、或节点已停止
 
 ```js
 console.log(slave.masterOnline);
 ```
 
-### `isMasterOnline()`
+#### `isMasterOnline()`
 
-**Slave 侧调用**，返回当前主节点在线状态。
+仅 `slave` 侧方法。
 
-说明：
-
-- 这是一个轻量公开 API，适合业务层轮询
-- 返回的是最近一次链路确认状态，不会主动发起一次实时网络探测
+返回当前主节点在线状态。该值基于最近一次链路确认结果，不会主动发起实时网络探测。
 
 ```js
 if (slave.isMasterOnline()) {
@@ -204,52 +289,218 @@ if (slave.isMasterOnline()) {
 }
 ```
 
-### `options.timeoutMs`
+#### `addAuthKey(slaveId, authKey)`
 
-单次 RPC 请求超时时间，默认 `5000` ms。
+仅 `master` 侧使用。
 
-### `publish(topic, payload)`
+动态添加或更新某个 `slave` 的 `authKey`，立即生效。
 
-**Master 侧调用**，向所有当前在线的 slave 广播消息（fire-and-forget，无需 await）。
+#### `removeAuthKey(slaveId)`
 
-- `topic`：消息主题字符串，slave 侧可按 topic 精确过滤
-- `payload`：同 RPC，支持 `string`、`Buffer`、`Uint8Array` 或其数组
-- 若某个 slave 发送失败，自动将其从在线列表移除并触发 `slave_disconnected`
+仅 `master` 侧使用。
 
-```js
-master.publish("news", "breaking news!");
-master.publish("metrics", JSON.stringify({ cpu: 0.42 }));
+移除某个 `slave` 的 `authKey`，立即生效，并触发 `slave_disconnected`。
+
+## 心跳机制
+
+ZNL 使用 `heartbeat -> heartbeat_ack` 进行链路确认。
+
+流程如下：
+
+1. `slave` 发送一条 `heartbeat`
+2. `master` 收到并验证通过后，立即返回 `heartbeat_ack`
+3. `slave` 收到 `heartbeat_ack` 后，调度下一次 heartbeat
+4. 若超过应答超时时间仍未收到 `heartbeat_ack``
+   - `slave` 将 `masterOnline` 置为 `false`
+   - 主动重建 `Dealer`
+   - 丢弃旧连接残留消息
+   - 尝试恢复连接与注册
+
+## 安全机制
+
+当 `encrypted=true` 时，ZNL 启用安全模式：
+
+- HMAC 签名
+- 时间戳校验
+- nonce 防重放
+- AES-256-GCM 透明加密
+- 可选 payload 摘要校验
+
+### 安全建议
+
+- `authKey` 不要硬编码到公开仓库
+- `master` 与 `slave` 必须使用匹配的密钥配置
+- 若使用 `authKeyMap`，建议按 `slaveId` 做最小权限配置
+- 生产环境建议开启：
+  - `encrypted: true`
+  - `enablePayloadDigest: true`
+
+## 底层帧协议
+
+本节说明 ZNL 在 ZeroMQ 上层定义的控制帧结构，用于协议对接、调试与抓包分析。
+
+### 总体说明
+
+`master` 侧 ROUTER 收包结构：
+
+```text
+[identity, ...控制帧]
 ```
 
-### `subscribe(topic, handler)`
+`slave` 侧 DEALER 收包结构：
 
-**Slave 侧调用**，订阅指定 topic，master 广播时触发 handler。
-
-- 可在 `start()` 前后任意时刻调用，订阅信息跨 stop/start 周期保留
-- 同一 topic 重复订阅会覆盖旧 handler
-- 支持链式调用（返回 `this`）
-
-```js
-slave
-  .subscribe("news",    ({ topic, payload }) => { /* ... */ })
-  .subscribe("metrics", ({ topic, payload }) => { /* ... */ });
+```text
+[...控制帧]
 ```
 
-### `unsubscribe(topic)`
+控制帧统一前缀：
 
-**Slave 侧调用**，取消订阅指定 topic，支持链式调用。
-
-```js
-slave.unsubscribe("news");
+```text
+__znl_v1__
 ```
 
-### `slaves`
+认证字段标记：
 
-**Master 侧只读属性**，返回当前所有在线 slave ID 的快照数组。
-
-```js
-console.log(master.slaves); // ["slave-001", "slave-002"]
+```text
+__znl_v1_auth__
 ```
+
+### 控制帧类型
+
+| 类型 | 方向 | 作用 |
+|------|------|------|
+| `register` | `slave -> master` | 注册上线 |
+| `unregister` | `slave -> master` | 主动下线 |
+| `heartbeat` | `slave -> master` | 心跳请求 |
+| `heartbeat_ack` | `master -> slave` | 心跳应答 |
+| `req` | 双向 | RPC 请求 |
+| `res` | 双向 | RPC 响应 |
+| `pub` | `master -> slave` | 广播消息 |
+
+### 各类帧结构
+
+#### `register`
+
+```text
+[PREFIX, "register", (AUTH_MARKER, authProof)?]
+```
+
+示例：
+
+```text
+["__znl_v1__", "register"]
+["__znl_v1__", "register", "__znl_v1_auth__", "<proof-token>"]
+```
+
+#### `unregister`
+
+```text
+[PREFIX, "unregister"]
+```
+
+示例：
+
+```text
+["__znl_v1__", "unregister"]
+```
+
+#### `heartbeat`
+
+```text
+[PREFIX, "heartbeat", (AUTH_MARKER, authProof)?]
+```
+
+示例：
+
+```text
+["__znl_v1__", "heartbeat"]
+["__znl_v1__", "heartbeat", "__znl_v1_auth__", "<proof-token>"]
+```
+
+#### `heartbeat_ack`
+
+```text
+[PREFIX, "heartbeat_ack", (AUTH_MARKER, authProof)?]
+```
+
+示例：
+
+```text
+["__znl_v1__", "heartbeat_ack"]
+["__znl_v1__", "heartbeat_ack", "__znl_v1_auth__", "<proof-token>"]
+```
+
+#### `req`
+
+```text
+[PREFIX, "req", requestId, (AUTH_MARKER, authProof)?, ...payloadFrames]
+```
+
+示例：
+
+```text
+["__znl_v1__", "req", "<requestId>", ...payloadFrames]
+["__znl_v1__", "req", "<requestId>", "__znl_v1_auth__", "<proof-token>", ...payloadFrames]
+```
+
+#### `res`
+
+```text
+[PREFIX, "res", requestId, (AUTH_MARKER, authProof)?, ...payloadFrames]
+```
+
+示例：
+
+```text
+["__znl_v1__", "res", "<requestId>", ...payloadFrames]
+["__znl_v1__", "res", "<requestId>", "__znl_v1_auth__", "<proof-token>", ...payloadFrames]
+```
+
+#### `pub`
+
+```text
+[PREFIX, "pub", topic, (AUTH_MARKER, authProof)?, ...payloadFrames]
+```
+
+示例：
+
+```text
+["__znl_v1__", "pub", "news", ...payloadFrames]
+["__znl_v1__", "pub", "news", "__znl_v1_auth__", "<proof-token>", ...payloadFrames]
+```
+
+### 认证令牌字段
+
+安全模式下，认证令牌内部包含以下字段：
+
+- `kind`
+- `nodeId`
+- `requestId`
+- `timestamp`
+- `nonce`
+- `payloadDigest`
+
+校验时会验证：
+
+- 帧类型是否匹配
+- 节点 ID 是否匹配
+- 请求 ID 是否匹配
+- 时间戳是否在允许偏差内
+- nonce 是否重复
+- payload 摘要是否一致
+
+### 明文模式与安全模式
+
+#### 明文模式 `encrypted=false`
+
+- 不签名
+- 不加密
+- 帧结构更轻量
+
+#### 安全模式 `encrypted=true`
+
+- 控制帧会附带认证证明
+- 业务 payload 会被透明加密
 
 ## 事件
 
@@ -262,16 +513,11 @@ console.log(master.slaves); // ["slave-001", "slave-002"]
 | `request` | 两者 | 解析出 RPC 请求帧（认证通过后） |
 | `response` | 两者 | 解析出 RPC 响应帧 |
 | `message` | 两者 | 所有解析消息的统一事件 |
-| `publish` | Slave | 收到 master 广播，携带 `{ topic, payload }` |
-| `slave_connected` | Master | slave 注册成功上线，携带 `slaveId` |
-| `slave_disconnected` | Master | slave 注销或发送失败下线，携带 `slaveId` |
+| `publish` | Slave | 收到 `master` 广播，携带 `{ topic, payload }` |
+| `slave_connected` | Master | `slave` 注册成功上线，携带 `slaveId` |
+| `slave_disconnected` | Master | `slave` 注销或发送失败下线，携带 `slaveId` |
 | `auth_failed` | Master / Slave | 认证失败（签名校验失败、重放检测失败、解密失败等），请求已被丢弃 |
 | `error` | 两者 | 内部错误 |
-
-> 心跳说明：
-> - Slave 发送 `heartbeat` 后，会等待 master 返回 `heartbeat_ack`
-> - 收到 `heartbeat_ack` 后才会调度下一次心跳，因此任意时刻最多只有一个未确认心跳在飞
-> - 若超过心跳应答超时仍未收到 `heartbeat_ack`，slave 会将 `masterOnline` 置为 `false`
 
 ## 本地示例
 
@@ -286,13 +532,23 @@ node test/slave/index.js slave-001
 
 ## 集成测试
 
-在同一进程内启动 Master / Slave，自动验证 RPC、并发、认证、超时、PUB/SUB 等全部功能：
+在同一进程内启动 `Master / Slave`，自动验证：
+
+- RPC
+- 并发
+- 认证
+- 超时
+- PUB/SUB
+- 心跳恢复
+- 在线状态 API
 
 ```bash
 pnpm test
 ```
 
 ## 并发压测
+
+### 明文模式
 
 ```bash
 # 终端 1：启动 Echo 服务端（plain）
@@ -302,7 +558,7 @@ pnpm test:echo
 pnpm test:100 -- 100 10000 slave-001
 ```
 
-启用安全模式示例：
+### 安全模式
 
 ```bash
 # 终端 1：加密模式启动 Echo 服务端
@@ -312,14 +568,26 @@ ZNL_AUTH_KEY=my-secret ZNL_ENCRYPTED=true pnpm test:echo
 pnpm test:100 -- 100 10000 slave-001 my-secret true
 ```
 
-参数说明：
+### 参数说明
 
 - 总请求数
 - 超时时间（毫秒）
-- Slave 节点 ID
+- `Slave` 节点 ID
 
-## 发布前检查
+## 常见问题
 
-1. 更新 `package.json` 中的 `name`、`version`、`author`、`repository`
-2. 确认 README 中的包名与 import 路径
-3. 按需更新 `LICENSE` 中的版权信息
+### 为什么 `slave.start()` 后立刻发送第一条请求可能失败？
+
+当前版本对 `Dealer` 的发送策略更严格。建议先等待 `slave.isMasterOnline() === true`，再发送首个业务请求。
+
+### 为什么会出现“令牌已过期或时间戳异常”？
+
+常见原因：
+
+- 主从机器时间差过大
+- 节点时间被手动修改
+- 历史旧消息在较晚时间才被投递
+
+### `masterOnline=true` 是否表示此刻网络一定可用？
+
+不是。该值表示最近一次链路确认成功，适合作为业务层在线状态参考，但不是一次即时网络探针。
