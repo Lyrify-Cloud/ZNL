@@ -64,6 +64,11 @@ master.on("slave_disconnected", (id) => {
   console.log(`${id} 下线，当前在线：${master.slaves.join(", ")}`);
 });
 
+// 监听 slave PUSH 推送
+master.on("push", ({ identityText, topic, payload }) => {
+  console.log(`[PUSH] from=${identityText} topic=${topic} payload=${payload.toString()}`);
+});
+
 await master.start();
 
 // 广播消息

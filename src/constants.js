@@ -27,7 +27,7 @@ export const CONTROL_REGISTER = "register";
 /** slave 下线注销帧标识符（slave → master，stop 时自动发送） */
 export const CONTROL_UNREGISTER = "unregister";
 
-/** 广播推送帧标识符（master → slave，publish 时发送） */
+/** 广播帧标识符（master → slave，publish 时发送） */
 export const CONTROL_PUB = "pub";
 
 /** 单向推送帧标识符（slave → master，push 时发送） */

@@ -1288,6 +1288,58 @@ await runner.test(
   },
 );
 
+await runner.test("encrypted 模式：PUSH 正常（透明加解密）", async () => {
+  const EP_PUSH_ENC = "tcp://127.0.0.1:16025";
+  const KEY = "sec-encrypted-push";
+
+  const mPE = new ZNL({
+    role: "master",
+    id: "m-push-enc",
+    endpoints: { router: EP_PUSH_ENC },
+    authKey: KEY,
+    encrypted: true,
+  });
+  const sPE = new ZNL({
+    role: "slave",
+    id: "s-push-enc",
+    endpoints: { router: EP_PUSH_ENC },
+    authKey: KEY,
+    encrypted: true,
+  });
+
+  const received = [];
+  mPE.on("push", ({ identityText, topic, payload }) => {
+    received.push({ identityText, topic, text: toText(payload) });
+  });
+
+  await mPE.start();
+  await sPE.start();
+  await delay(200);
+
+  sPE.PUSH("metrics", "enc-cpu=0.42");
+  await delay(200);
+
+  runner.assert(
+    received.length === 1,
+    `encrypted push 收到 1 条 → ${received.length}`,
+  );
+  runner.assert(
+    received[0]?.identityText === "s-push-enc",
+    `identity 匹配 → "${received[0]?.identityText}"`,
+  );
+  runner.assert(
+    received[0]?.topic === "metrics",
+    `topic 匹配 → "${received[0]?.topic}"`,
+  );
+  runner.assert(
+    received[0]?.text === "enc-cpu=0.42",
+    `payload 匹配 → "${received[0]?.text}"`,
+  );
+
+  await sPE.stop();
+  await mPE.stop();
+});
+
 await runner.test(
   "encrypted 模式：payloadDigest 配置不一致（PUBLISH）触发 auth_failed",
   async () => {
