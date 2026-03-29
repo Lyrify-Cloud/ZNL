@@ -4,14 +4,15 @@
  * 封装 ROUTER/DEALER 双向通信，对外提供：
  *  - DEALER()       slave 侧发 RPC 请求 / 注册自动回复处理器
  *  - ROUTER()       master 侧发 RPC 请求 / 注册自动回复处理器
- *  - publish()      master 侧向所有在线 slave 广播消息（模拟 PUB）
- *  - subscribe()    slave 侧订阅指定 topic
- *  - unsubscribe()  slave 侧取消订阅
+ *  - PUBLISH()      master 侧向所有在线 slave 广播消息（模拟 PUB）
+ *  - SUBSCRIBE()    slave 侧订阅指定 topic
+ *  - UNSUBSCRIBE()  slave 侧取消订阅
+ *  - PUSH()         slave 侧向 master 单向推送消息（模拟 PUSH）
  *  - start() / stop() 生命周期管理
  *  - EventEmitter 事件总线：
  *      router / dealer / request / response / message
  *      auth_failed / slave_connected / slave_disconnected
- *      publish / error
+ *      publish / push / error
  *
  * 加密模式（encrypted）：
  *  - false : 明文模式（不签名/不加密）
@@ -53,6 +54,7 @@ import {
   buildRequestFrames,
   buildResponseFrames,
   buildPublishFrames,
+  buildPushFrames,
   parseControlFrames,
 } from "./protocol.js";
 
@@ -379,7 +381,7 @@ export class ZNL extends EventEmitter {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  //  公开 API —— PUB/SUB
+  //  公开 API —— PUB/SUB/PUSH
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
@@ -391,9 +393,9 @@ export class ZNL extends EventEmitter {
    * @param {string} topic - 消息主题，slave 侧可按 topic 精确过滤
    * @param {string|Buffer|Uint8Array|Array} payload
    */
-  publish(topic, payload) {
+  PUBLISH(topic, payload) {
     if (this.role !== "master") {
-      throw new Error("publish() 只能在 master 侧调用。");
+      throw new Error("PUBLISH() 只能在 master 侧调用。");
     }
     const socket = this.#requireSocket("router", "ROUTER");
     if (this.#slaves.size === 0) return;
@@ -449,9 +451,9 @@ export class ZNL extends EventEmitter {
    * @param {(event: { topic: string, payload: Buffer|Array }) => void|Promise<void>} handler
    * @returns {this} 支持链式调用
    */
-  subscribe(topic, handler) {
+  SUBSCRIBE(topic, handler) {
     if (this.role !== "slave") {
-      throw new Error("subscribe() 只能在 slave 侧调用。");
+      throw new Error("SUBSCRIBE() 只能在 slave 侧调用。");
     }
     if (typeof handler !== "function") {
       throw new TypeError("handler 必须是函数。");
@@ -466,12 +468,43 @@ export class ZNL extends EventEmitter {
    * @param {string} topic
    * @returns {this} 支持链式调用
    */
-  unsubscribe(topic) {
+  UNSUBSCRIBE(topic) {
     if (this.role !== "slave") {
-      throw new Error("unsubscribe() 只能在 slave 侧调用。");
+      throw new Error("UNSUBSCRIBE() 只能在 slave 侧调用。");
     }
     this.#subscriptions.delete(String(topic));
     return this;
+  }
+
+  /**
+   * 【Slave 侧】向 master 单向推送消息（fire-and-forget）
+   *
+   * 发送异步入队后立即返回，无需 await。
+   *
+   * @param {string} topic
+   * @param {string|Buffer|Uint8Array|Array} payload
+   */
+  PUSH(topic, payload) {
+    if (this.role !== "slave") {
+      throw new Error("PUSH() 只能在 slave 侧调用。");
+    }
+    const socket = this.#requireSocket("dealer", "DEALER");
+    const topicText = String(topic);
+
+    const payloadFrames = this.#sealPayloadFrames(
+      "push",
+      topicText,
+      payload,
+      this.#encryptKey,
+    );
+    const authProof = this.#secureEnabled
+      ? this.#createAuthProof("push", topicText, payloadFrames)
+      : "";
+
+    const frames = buildPushFrames(topicText, payloadFrames, authProof);
+    this.#sendQueue
+      .enqueue("dealer", () => socket.send(frames))
+      .catch(() => {});
   }
 
   /**
@@ -791,6 +824,70 @@ export class ZNL extends EventEmitter {
       if (this.#slaves.delete(identityText)) {
         this.emit("slave_disconnected", identityText);
       }
+      return;
+    }
+
+    // ── PUSH 推送：slave -> master ─────────────────────────────────────────
+    if (parsed.kind === "push") {
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const keys = this.#resolveSlaveKeys(identityText);
+        if (!keys) {
+          this.#emitAuthFailed(event, "未配置该 slave 的 authKey。");
+          if (this.#slaves.delete(identityText)) {
+            this.emit("slave_disconnected", identityText);
+          }
+          return;
+        }
+
+        const v = this.#verifyIncomingProof({
+          kind: "push",
+          proofToken: parsed.authProof,
+          requestId: parsed.topic ?? "",
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: identityText,
+          signKey: keys.signKey,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        this.#ensureSlaveOnline(identityText, identity, {
+          touch: true,
+          signKey: keys.signKey,
+          encryptKey: keys.encryptKey,
+        });
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "push",
+              parsed.topic ?? "",
+              parsed.payloadFrames,
+              identityText,
+              keys.encryptKey,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `推送 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      } else {
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
+      }
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const pushEvent = {
+        ...event,
+        topic: parsed.topic,
+        payload: finalPayload,
+      };
+      this.emit("push", pushEvent);
       return;
     }
 
@@ -1536,7 +1633,7 @@ export class ZNL extends EventEmitter {
   /**
    * 生成签名证明令牌
    *
-   * @param {"register"|"heartbeat"|"heartbeat_ack"|"request"|"response"|"publish"} kind
+   * @param {"register"|"heartbeat"|"heartbeat_ack"|"request"|"response"|"publish"|"push"} kind
    * @param {string} requestId
    * @param {Buffer[]} payloadFrames
    * @returns {string}
@@ -1567,7 +1664,7 @@ export class ZNL extends EventEmitter {
    * 校验入站签名证明 + 防重放 + 摘要一致性
    *
    * @param {{
-   *   kind: "register"|"heartbeat"|"heartbeat_ack"|"request"|"response"|"publish",
+   *   kind: "register"|"heartbeat"|"heartbeat_ack"|"request"|"response"|"publish"|"push",
    *   proofToken: string|null,
    *   requestId: string|null,
    *   payloadFrames: Buffer[],
@@ -1646,7 +1743,7 @@ export class ZNL extends EventEmitter {
    * - plain/auth   : 维持原有 normalizeFrames
    * - encrypted    : 透明加密为安全信封
    *
-   * @param {"request"|"response"|"publish"} kind
+   * @param {"request"|"response"|"publish"|"push"} kind
    * @param {string} requestId
    * @param {*} payload
    * @returns {Buffer[]}
@@ -1679,7 +1776,7 @@ export class ZNL extends EventEmitter {
    * - encrypted=true 时要求收到加密信封
    * - 解密后恢复为 Buffer[]，再由 payloadFromFrames 还原
    *
-   * @param {"request"|"response"|"publish"} kind
+   * @param {"request"|"response"|"publish"|"push"} kind
    * @param {string} requestId
    * @param {Buffer[]} payloadFrames
    * @param {string} senderNodeId

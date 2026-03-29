@@ -11,6 +11,7 @@
  *   请求帧：     [PREFIX, "req", requestId, (AUTH_MARKER, authKey)?, ...payload]
  *   响应帧：     [PREFIX, "res", requestId, ...payload]
  *   广播帧：     [PREFIX, "pub", topic, ...payload]
+ *   推送帧：     [PREFIX, "push", topic, ...payload]
  *   Router 侧额外在最前面加一帧：[identity, ...]
  */
 
@@ -22,6 +23,7 @@ import {
   CONTROL_REGISTER,
   CONTROL_UNREGISTER,
   CONTROL_PUB,
+  CONTROL_PUSH,
   CONTROL_HEARTBEAT,
   CONTROL_HEARTBEAT_ACK,
   EMPTY_BUFFER,
@@ -171,6 +173,25 @@ export function buildPublishFrames(topic, payloadFrames, authProof = "") {
 }
 
 /**
+ * 构建推送控制帧数组（slave → master）
+ * 帧结构：[PREFIX, "push", topic, (AUTH_MARKER, authProof)?, ...payloadFrames]
+ *
+ * 说明：
+ * - `authProof` 是可选的认证证明（例如签名令牌）。
+ * - 不传时与历史协议完全兼容。
+ *
+ * @param {string} topic - 消息主题
+ * @param {Array<string|Buffer>} payloadFrames - 已标准化的 payload 帧
+ * @param {string} [authProof] - 可选认证证明
+ * @returns {Array}
+ */
+export function buildPushFrames(topic, payloadFrames, authProof = "") {
+  const header = [CONTROL_PREFIX, CONTROL_PUSH, String(topic)];
+  if (authProof) header.push(CONTROL_AUTH, authProof);
+  return [...header, ...payloadFrames];
+}
+
+/**
  * 构建心跳控制帧数组（slave → master）
  * 帧结构：[PREFIX, "heartbeat", (AUTH_MARKER, authProof)?]
  *
@@ -207,13 +228,14 @@ export function buildHeartbeatAckFrames(authProof = "") {
  * - "heartbeat"     → slave 发起保活心跳
  * - "heartbeat_ack" → master 返回心跳应答
  * - "publish"       → master 广播消息（携带 topic）
+ * - "push"          → slave 单向推送消息（携带 topic）
  * - "request"       → 对端主动发起的 RPC 请求
  * - "response"      → 对端返回的 RPC 响应（匹配 pending 请求）
  * - "message"       → 非控制帧，普通消息透传
  *
  * @param {Array} frames - 不含 identity 帧的帧数组
  * @returns {{
- *   kind         : "register"|"unregister"|"heartbeat"|"heartbeat_ack"|"publish"|"request"|"response"|"message",
+ *   kind         : "register"|"unregister"|"heartbeat"|"heartbeat_ack"|"publish"|"push"|"request"|"response"|"message",
  *   requestId    : string|null,
  *   authKey      : string|null,
  *   authProof    : string|null,
@@ -312,6 +334,28 @@ export function parseControlFrames(frames) {
 
     return {
       kind: "publish",
+      requestId: null,
+      authKey: null,
+      authProof,
+      topic,
+      payloadFrames: frames.slice(payloadStart),
+    };
+  }
+
+  // ── 推送帧：[PREFIX, "push", topic, ...payloadFrames] ────────────────────
+  if (action === CONTROL_PUSH && frames.length >= 3) {
+    const topic = frames[2]?.toString() ?? "";
+    let payloadStart = 3;
+    let authProof = null;
+
+    // 推送帧可携带可选认证证明：[PREFIX, "push", topic, AUTH_MARKER, authProof, ...payload]
+    if (frames.length >= 5 && frames[3]?.toString() === CONTROL_AUTH) {
+      authProof = frames[4]?.toString() ?? "";
+      payloadStart = 5;
+    }
+
+    return {
+      kind: "push",
       requestId: null,
       authKey: null,
       authProof,

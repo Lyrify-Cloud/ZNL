@@ -11,10 +11,10 @@
  *  7) 认证失败：错误 authKey / 错误 master key
  *  8) 超时控制：无处理器时超时 & 超时时机
  *  9) stop() 取消 pending：in-flight 立即 reject
- * 10) PUB/SUB：订阅过滤、多 slave 广播、connected/disconnected、unsubscribe
+ * 10) PUB/SUB：订阅过滤、多 slave 广播、connected/disconnected、UNSUBSCRIBE
  * 11) 心跳：禁用心跳不移除、自定义 heartbeatTimeoutMs 生效
  * 12) 加密：RPC + PUB 正常（透明加解密）
- * 13) 加密：publish digest mismatch 触发 auth_failed
+ * 13) 加密：PUBLISH digest mismatch 触发 auth_failed
  * 14) 安全：防重放（同 nonce+requestId）拒绝
  * 15) 安全：时间漂移超限拒绝
  * 16) authKeyMap：命中优先级不回退
@@ -711,10 +711,10 @@ await runner.test("stop() 期间所有 in-flight 请求立即 reject", async () 
 });
 
 // ══════════════════════════════════════════════════════════
-//  PUB/SUB 广播
+//  PUB/SUB/PUSH 广播
 // ══════════════════════════════════════════════════════════
 
-runner.section("PUB/SUB 广播");
+runner.section("PUB/SUB/PUSH 广播");
 
 await runner.test(
   "slave 只收到已订阅的 topic，未订阅的 topic 静默丢弃",
@@ -729,7 +729,7 @@ await runner.test(
 
     const received = [];
 
-    s4.subscribe("news", ({ topic, payload }) => {
+    s4.SUBSCRIBE("news", ({ topic, payload }) => {
       received.push({ topic, text: toText(payload) });
     });
 
@@ -742,8 +742,8 @@ await runner.test(
       `master.slaves 包含 s4 → ${m4.slaves}`,
     );
 
-    m4.publish("news", "breaking news!");
-    m4.publish("weather", "sunny day");
+    m4.PUBLISH("news", "breaking news!");
+    m4.PUBLISH("weather", "sunny day");
     await delay(100);
 
     runner.assert(
@@ -765,7 +765,7 @@ await runner.test(
 );
 
 await runner.test(
-  "多 slave 广播：每个 slave 都能收到，slave.on('publish') 兜底监听",
+  "多 slave 广播：每个 slave 都能收到，slave.on('publish') 兜底监听（PUBLISH）",
   async () => {
     const EP5 = "tcp://127.0.0.1:16007";
     const m5 = new ZNL({
@@ -787,7 +787,7 @@ await runner.test(
     const s5aLog = [];
     const s5bLog = [];
 
-    s5a.subscribe("chat", ({ payload }) => s5aLog.push(toText(payload)));
+    s5a.SUBSCRIBE("chat", ({ payload }) => s5aLog.push(toText(payload)));
     s5b.on("publish", ({ topic, payload }) =>
       s5bLog.push(`${topic}:${toText(payload)}`),
     );
@@ -799,8 +799,8 @@ await runner.test(
 
     runner.assert(m5.slaves.length === 2, `2 个 slave 已注册 → ${m5.slaves}`);
 
-    m5.publish("chat", "hello everyone");
-    m5.publish("system", "server ok");
+    m5.PUBLISH("chat", "hello everyone");
+    m5.PUBLISH("system", "server ok");
     await delay(100);
 
     runner.assert(s5aLog.length === 1, `s5a 收到 1 条 → 实际 ${s5aLog.length}`);
@@ -862,27 +862,27 @@ await runner.test(
   },
 );
 
-await runner.test("unsubscribe() 后不再收到该 topic 的消息", async () => {
+await runner.test("UNSUBSCRIBE() 后不再收到该 topic 的消息", async () => {
   const EP7 = "tcp://127.0.0.1:16009";
   const m7 = new ZNL({ role: "master", id: "m7", endpoints: { router: EP7 } });
   const s7 = new ZNL({ role: "slave", id: "s7", endpoints: { router: EP7 } });
 
   const logList = [];
-  s7.subscribe("ping", ({ payload }) => logList.push(toText(payload)));
+  s7.SUBSCRIBE("ping", ({ payload }) => logList.push(toText(payload)));
 
   await m7.start();
   await s7.start();
   await delay(200);
 
-  m7.publish("ping", "first");
+  m7.PUBLISH("ping", "first");
   await delay(100);
   runner.assert(
     logList.length === 1,
     `订阅期间收到第 1 条 → ${logList.length} 条`,
   );
 
-  s7.unsubscribe("ping");
-  m7.publish("ping", "second");
+  s7.UNSUBSCRIBE("ping");
+  m7.PUBLISH("ping", "second");
   await delay(100);
   runner.assert(
     logList.length === 1,
@@ -891,6 +891,49 @@ await runner.test("unsubscribe() 后不再收到该 topic 的消息", async () =
 
   await s7.stop();
   await m7.stop();
+});
+
+await runner.test("PUSH：slave 单向推送 master 收到 push 事件", async () => {
+  const EP_PUSH = "tcp://127.0.0.1:16010";
+  const mPush = new ZNL({
+    role: "master",
+    id: "m-push",
+    endpoints: { router: EP_PUSH },
+  });
+  const sPush = new ZNL({
+    role: "slave",
+    id: "s-push",
+    endpoints: { router: EP_PUSH },
+  });
+
+  const received = [];
+  mPush.on("push", ({ identityText, topic, payload }) => {
+    received.push({ identityText, topic, text: toText(payload) });
+  });
+
+  await mPush.start();
+  await sPush.start();
+  await delay(200);
+
+  sPush.PUSH("metrics", "cpu=0.42");
+  await delay(120);
+
+  runner.assert(received.length === 1, `收到 1 条 push → ${received.length}`);
+  runner.assert(
+    received[0]?.identityText === "s-push",
+    `identity 匹配 → "${received[0]?.identityText}"`,
+  );
+  runner.assert(
+    received[0]?.topic === "metrics",
+    `topic 匹配 → "${received[0]?.topic}"`,
+  );
+  runner.assert(
+    received[0]?.text === "cpu=0.42",
+    `payload 匹配 → "${received[0]?.text}"`,
+  );
+
+  await sPush.stop();
+  await mPush.stop();
 });
 
 await runner.test("master 重启后 slave 自动补注册并恢复广播", async () => {
@@ -910,7 +953,7 @@ await runner.test("master 重启后 slave 自动补注册并恢复广播", async
   });
 
   const received = [];
-  s9.subscribe("news", ({ payload }) => received.push(toText(payload)));
+  s9.SUBSCRIBE("news", ({ payload }) => received.push(toText(payload)));
 
   await m9.start();
   await s9.start();
@@ -939,7 +982,7 @@ await runner.test("master 重启后 slave 自动补注册并恢复广播", async
   }
   runner.assert(registered, `重启后自动补注册成功 → ${m9b.slaves}`);
 
-  m9b.publish("news", "after-restart");
+  m9b.PUBLISH("news", "after-restart");
   await delay(150);
   runner.assert(
     received.includes("after-restart"),
@@ -1208,7 +1251,7 @@ await runner.test(
     });
 
     const pubLog = [];
-    s10.subscribe("news", ({ payload }) => pubLog.push(toText(payload)));
+    s10.SUBSCRIBE("news", ({ payload }) => pubLog.push(toText(payload)));
 
     m10.ROUTER(async ({ payload }) => `ENC-M:${toText(payload)}`);
     s10.DEALER(async ({ payload }) => `ENC-S:${toText(payload)}`);
@@ -1229,7 +1272,7 @@ await runner.test(
       `encrypted master→slave 正常 → "${toText(r2)}"`,
     );
 
-    m10.publish("news", "encrypted-news-1");
+    m10.PUBLISH("news", "encrypted-news-1");
     await delay(120);
     runner.assert(
       pubLog.length === 1,
@@ -1246,7 +1289,7 @@ await runner.test(
 );
 
 await runner.test(
-  "encrypted 模式：payloadDigest 配置不一致（publish）触发 auth_failed",
+  "encrypted 模式：payloadDigest 配置不一致（PUBLISH）触发 auth_failed",
   async () => {
     const EP_PD = "tcp://127.0.0.1:16024";
     const KEY = "sec-encrypted-pub-digest";
@@ -1273,7 +1316,7 @@ await runner.test(
     sPD.on("auth_failed", () => {
       authFailed = true;
     });
-    sPD.subscribe("news", () => {
+    sPD.SUBSCRIBE("news", () => {
       received = true;
     });
 
@@ -1281,11 +1324,11 @@ await runner.test(
     await sPD.start();
     await delay(200);
 
-    mPD.publish("news", "digest-mismatch");
+    mPD.PUBLISH("news", "digest-mismatch");
     await delay(200);
 
     runner.assert(authFailed, "slave 侧 auth_failed 已触发");
-    runner.assert(!received, "认证失败不应收到 publish");
+    runner.assert(!received, "认证失败不应收到 PUBLISH");
 
     await sPD.stop();
     await mPD.stop();

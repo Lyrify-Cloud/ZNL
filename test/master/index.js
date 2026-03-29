@@ -96,7 +96,7 @@ const newsTimer = setInterval(() => {
   });
 
   console.log(`[MASTER][PUB → news] ${payload}`);
-  master.publish("news", payload);
+  master.PUBLISH("news", payload);
 }, 5000);
 
 // ─── 定时广播：system topic（每 15 秒）───────────────────────────────────────
@@ -106,7 +106,7 @@ const systemTimer = setInterval(() => {
 
   const payload = `系统运行正常 | 时间: ${now()} | 在线: ${master.slaves.length} 个节点`;
   console.log(`[MASTER][PUB → system] ${payload}`);
-  master.publish("system", payload);
+  master.PUBLISH("system", payload);
 }, 15000);
 
 // ─── 定时 RPC：每 7 秒主动向 slave-001 发 ping ────────────────────────────────

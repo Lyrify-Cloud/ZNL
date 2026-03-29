@@ -6,6 +6,7 @@
 
 - 基于单连接实现双向 RPC 与广播
 - 支持 `Master -> Slave` 与 `Slave -> Master` 双向主动请求
+- 支持 `Slave -> Master` 单向推送（PUSH）
 - `Slave` 自动注册 / 注销，`Master` 实时维护在线节点列表
 - 支持请求超时控制与最大并发限制
 - 心跳采用 `heartbeat -> heartbeat_ack` 应答机制
@@ -66,8 +67,8 @@ master.on("slave_disconnected", (id) => {
 await master.start();
 
 // 广播消息
-master.publish("news", "今日头条：ZNL 正式发布");
-master.publish("system", JSON.stringify({ status: "ok", time: Date.now() }));
+master.PUBLISH("news", "今日头条：ZNL 正式发布");
+master.PUBLISH("system", JSON.stringify({ status: "ok", time: Date.now() }));
 ```
 
 ### Slave
@@ -86,7 +87,7 @@ const slave = new ZNL({
 });
 
 // 订阅指定 topic
-slave.subscribe("news", ({ payload }) => {
+slave.SUBSCRIBE("news", ({ payload }) => {
   console.log("收到新闻：", payload.toString());
 });
 
@@ -100,6 +101,7 @@ await slave.start();
 if (slave.isMasterOnline()) {
   const reply = await slave.DEALER("hello master", { timeoutMs: 4000 });
   console.log(reply.toString());
+  slave.PUSH("system", "hello master");
 }
 ```
 
@@ -204,9 +206,9 @@ new ZNL({
 
 单次 RPC 请求超时时间，默认 `5000` 毫秒。
 
-### 广播与订阅
+### 广播 / 订阅 / 推送
 
-#### `publish(topic, payload)`
+#### `PUBLISH(topic, payload)`
 
 仅 `master` 侧使用。
 
@@ -217,11 +219,11 @@ new ZNL({
 - 若某个 `slave` 发送失败，会自动将其移出在线列表并触发 `slave_disconnected`
 
 ```js
-master.publish("news", "breaking news!");
-master.publish("metrics", JSON.stringify({ cpu: 0.42 }));
+master.PUBLISH("news", "breaking news!");
+master.PUBLISH("metrics", JSON.stringify({ cpu: 0.42 }));
 ```
 
-#### `subscribe(topic, handler)`
+#### `SUBSCRIBE(topic, handler)`
 
 仅 `slave` 侧使用。
 
@@ -234,22 +236,35 @@ master.publish("metrics", JSON.stringify({ cpu: 0.42 }));
 
 ```js
 slave
-  .subscribe("news", ({ topic, payload }) => {
+  .SUBSCRIBE("news", ({ topic, payload }) => {
     // ...
   })
-  .subscribe("metrics", ({ topic, payload }) => {
+  .SUBSCRIBE("metrics", ({ topic, payload }) => {
     // ...
   });
 ```
 
-#### `unsubscribe(topic)`
+#### `UNSUBSCRIBE(topic)`
 
 仅 `slave` 侧使用。
 
 取消订阅指定 topic。
 
 ```js
-slave.unsubscribe("news");
+slave.UNSUBSCRIBE("news");
+```
+
+#### `PUSH(topic, payload)`
+
+仅 `slave` 侧使用。
+
+向 `master` 单向推送消息（fire-and-forget，无需 `await`）。
+
+- `topic`：消息主题
+- `payload`：支持 `string`、`Buffer`、`Uint8Array` 或其数组
+
+```js
+slave.PUSH("metrics", JSON.stringify({ cpu: 0.42 }));
 ```
 
 ### 在线状态与节点管理
@@ -376,6 +391,7 @@ __znl_v1_auth__
 | `req` | 双向 | RPC 请求 |
 | `res` | 双向 | RPC 响应 |
 | `pub` | `master -> slave` | 广播消息 |
+| `push` | `slave -> master` | 单向推送 |
 
 ### 各类帧结构
 
@@ -469,6 +485,19 @@ __znl_v1_auth__
 ["__znl_v1__", "pub", "news", "__znl_v1_auth__", "<proof-token>", ...payloadFrames]
 ```
 
+#### `push`
+
+```text
+[PREFIX, "push", topic, (AUTH_MARKER, authProof)?, ...payloadFrames]
+```
+
+示例：
+
+```text
+["__znl_v1__", "push", "metrics", ...payloadFrames]
+["__znl_v1__", "push", "metrics", "__znl_v1_auth__", "<proof-token>", ...payloadFrames]
+```
+
 ### 认证令牌字段
 
 安全模式下，认证令牌内部包含以下字段：
@@ -514,6 +543,7 @@ __znl_v1_auth__
 | `response` | 两者 | 解析出 RPC 响应帧 |
 | `message` | 两者 | 所有解析消息的统一事件 |
 | `publish` | Slave | 收到 `master` 广播，携带 `{ topic, payload }` |
+| `push` | Master | 收到 `slave` 推送，携带 `{ identityText, topic, payload }` |
 | `slave_connected` | Master | `slave` 注册成功上线，携带 `slaveId` |
 | `slave_disconnected` | Master | `slave` 注销或发送失败下线，携带 `slaveId` |
 | `auth_failed` | Master / Slave | 认证失败（签名校验失败、重放检测失败、解密失败等），请求已被丢弃 |

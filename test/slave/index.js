@@ -54,10 +54,10 @@ const waitForMasterOnline = async (timeoutMs = 5000, intervalMs = 100) => {
 // ─── 订阅 PUB/SUB topic（start 前注册，连接后自动生效）─────────────────────────
 
 slave
-  .subscribe("news", ({ payload }) => {
+  .SUBSCRIBE("news", ({ payload }) => {
     console.log(`[${id}][NEWS] ${toText(payload)}`);
   })
-  .subscribe("system", ({ payload }) => {
+  .SUBSCRIBE("system", ({ payload }) => {
     console.log(`[${id}][SYSTEM] ${toText(payload)}`);
   });
 
@@ -87,6 +87,7 @@ if (await waitForMasterOnline(5000)) {
       timeoutMs: 4000,
     });
     console.log(`[${id}][启动问候回复] ${toText(bootReply)}`);
+    slave.PUSH("system", `启动完成：${id}`);
   } catch (error) {
     console.error(`[${id}][启动问候失败]`, error?.message ?? error);
   }
