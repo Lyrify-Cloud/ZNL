@@ -37,4 +37,4 @@ jobs:
         run: pnpm rebuild zeromq
 
       - name: Test (all)
-        run: pnpm run test:all --if-present
+        run: pnpm run test --if-present

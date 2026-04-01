@@ -15,8 +15,8 @@
 
 相关文档：
 
-- 主说明：`../README.md`
-- 底层协议：`./README.protocol.md`
+- 主说明：[README.md](../README.md)
+- 底层协议：[README.protocol.md](./README.protocol.md)
 
 ## 文档导航
 
@@ -31,15 +31,15 @@
 
 通用 API 主要覆盖 ZNL 的基础通信能力与运行时能力：
 
-- `2. 构造函数`
-- `3. 生命周期 API`
-- `4. 双向 RPC API`
-- `5. 广播 / 订阅 / 推送 API`
-- `6. 在线状态与节点管理 API`
-- `8. 事件 API`
-- `9. Payload 与返回值约定`
-- `10. 使用建议与最佳实践`
-- `11. 典型 API 选择建议`
+- [`2. 构造函数`](#2-构造函数)
+- [`3. 生命周期 API`](#3-生命周期-api)
+- [`4. 双向 RPC API`](#4-双向-rpc-api)
+- [`5. 广播 / 订阅 / 推送 API`](#5-广播--订阅--推送-api)
+- [`6. 在线状态与节点管理 API`](#6-在线状态与节点管理-api)
+- [`8. 事件 API`](#8-事件-api)
+- [`9. Payload 与返回值约定`](#9-payload-与返回值约定)
+- [`10. 使用建议与最佳实践`](#10-使用建议与最佳实践)
+- [`11. 典型 API 选择建议`](#11-典型-api-选择建议)
 
 适合查阅：
 
@@ -54,17 +54,17 @@
 
 `fs` API 专门覆盖内建文件服务：
 
-- `7. 内建文件服务 fs API`
-  - `7.1 slave.fs.setRoot(rootPath)`
-  - `7.2 master.fs.list(slaveId, path, options?)`
-  - `7.3 master.fs.get(slaveId, path, options?)`
-  - `7.4 master.fs.patch(slaveId, path, unifiedDiff, options?)`
-  - `7.5 master.fs.delete(slaveId, path, options?)`
-  - `7.6 master.fs.rename(slaveId, from, to, options?)`
-  - `7.7 master.fs.stat(slaveId, path, options?)`
-  - `7.8 master.fs.upload(slaveId, localPath, remotePath, options?)`
-  - `7.9 master.fs.download(slaveId, remotePath, localPath, options?)`
-  - `7.10 fs 使用建议`
+- [`7. 内建文件服务 fs API`](#7-内建文件服务-fs-api)
+  - [`7.1 slave.fs.setRoot(rootPath)`](#71-slavefssetrootrootpath)
+  - [`7.2 master.fs.list(slaveId, path, options?)`](#72-masterfslistslaveid-path-options)
+  - [`7.3 master.fs.get(slaveId, path, options?)`](#73-masterfsgetslaveid-path-options)
+  - [`7.4 master.fs.patch(slaveId, path, unifiedDiff, options?)`](#74-masterfspatchslaveid-path-unifieddiff-options)
+  - [`7.5 master.fs.delete(slaveId, path, options?)`](#75-masterfsdeleteslaveid-path-options)
+  - [`7.6 master.fs.rename(slaveId, from, to, options?)`](#76-masterfsrenameslaveid-from-to-options)
+  - [`7.7 master.fs.stat(slaveId, path, options?)`](#77-masterfsstatslaveid-path-options)
+  - [`7.8 master.fs.upload(slaveId, localPath, remotePath, options?)`](#78-masterfsuploadslaveid-localpath-remotepath-options)
+  - [`7.9 master.fs.download(slaveId, remotePath, localPath, options?)`](#79-masterfsdownloadslaveid-remotepath-localpath-options)
+  - [`7.10 fs 使用建议`](#710-fs-使用建议)
 
 适合查阅：
 

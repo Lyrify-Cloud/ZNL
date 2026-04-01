@@ -14,16 +14,16 @@
 
 为了让文档结构更清晰，详细内容已经拆分到独立文件：
 
-- API 参考：`docs/README.api.md`
-- 使用示例与实践：`docs/README.examples.md`
-- 底层帧协议：`docs/README.protocol.md`
+- API 参考：[docs/README.api.md](docs/README.api.md)
+- 使用示例与实践：[docs/README.examples.md](docs/README.examples.md)
+- 底层帧协议：[docs/README.protocol.md](docs/README.protocol.md)
 
 建议阅读顺序：
 
 1. 本文档：快速了解项目
-2. `docs/README.examples.md`：先看怎么用
-3. `docs/README.api.md`：再查完整 API
-4. `docs/README.protocol.md`：最后看底层协议细节
+2. [docs/README.examples.md](docs/README.examples.md)：先看怎么用
+3. [docs/README.api.md](docs/README.api.md)：再查完整 API
+4. [docs/README.protocol.md](docs/README.protocol.md)：最后看底层协议细节
 
 ---
 
@@ -116,7 +116,7 @@ if (slave.isMasterOnline()) {
 
 如果你想直接看更多完整示例，请阅读：
 
-- `docs/README.examples.md`
+- [docs/README.examples.md](docs/README.examples.md)
 
 ---
 
@@ -143,7 +143,7 @@ new ZNL({
 
 完整参数说明请查看：
 
-- `docs/README.api.md`
+- [docs/README.api.md](docs/README.api.md)
 
 性能建议：
 
@@ -229,8 +229,8 @@ await slave.start();
 
 详细 API 和完整示例请分别查看：
 
-- API：`docs/README.api.md`
-- 示例：`docs/README.examples.md`
+- API：[docs/README.api.md](docs/README.api.md)
+- 示例：[docs/README.examples.md](docs/README.examples.md)
 
 ---
 
@@ -247,7 +247,7 @@ await slave.start();
 
 ### 1. API 参考
 
-`docs/README.api.md`
+[docs/README.api.md](docs/README.api.md)
 
 适合查阅：
 
@@ -262,7 +262,7 @@ await slave.start();
 
 ### 2. 使用示例与实践
 
-`docs/README.examples.md`
+[docs/README.examples.md](docs/README.examples.md)
 
 适合查阅：
 
@@ -276,7 +276,7 @@ await slave.start();
 
 ### 3. 底层协议说明
 
-`docs/README.protocol.md`
+[docs/README.protocol.md](docs/README.protocol.md)
 
 适合查阅：
 
@@ -413,6 +413,6 @@ pnpm test:100 -- 100 10000 slave-001 my-secret true
 
 详细内容请继续阅读：
 
-- `docs/README.api.md`
-- `docs/README.examples.md`
-- `docs/README.protocol.md`
+- [docs/README.api.md](docs/README.api.md)
+- [docs/README.examples.md](docs/README.examples.md)
+- [docs/README.protocol.md](docs/README.protocol.md)
