@@ -1,6 +1,6 @@
 {
   "name": "@lyrify/znl",
-  "version": "0.6.2",
+  "version": "0.6.4",
   "description": "ZNL - ZeroMQ Node Link",
   "type": "module",
   "main": "./index.js",
@@ -28,7 +28,7 @@
     "test:100": "node test/slave/test-100-concurrent.js",
     "test:load": "node test/load-report.js",
     "test:capture": "node test/capture-frames.js",
-    "check": "node --check index.js && node --check src/constants.js && node --check src/protocol.js && node --check src/security.js && node --check src/PendingManager.js && node --check src/SendQueue.js && node --check src/ZNL.js && node --check test/master/index.js && node --check test/slave/index.js && node --check test/master/test-echo-server.js && node --check test/slave/test-100-concurrent.js && node --check test/run.js",
+    "check": "node --check index.js && node --check src/constants.js && node --check src/protocol.js && node --check src/security.js && node --check src/PendingManager.js && node --check src/SendQueue.js && node --check src/ZNL.js && node --check test/master/index.js && node --check test/slave/index.js && node --check test/master/test-echo-server.js && node --check test/slave/test-100-concurrent.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier . --check",

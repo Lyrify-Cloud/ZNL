@@ -115,7 +115,7 @@
 | `heartbeatInterval` | `number` | 否 | `3000` | 心跳间隔毫秒；`0` 表示禁用 |
 | `heartbeatTimeoutMs` | `number` | 否 | `0` | 心跳超时；`0` 表示使用 `heartbeatInterval × 3` |
 | `encrypted` | `boolean` | 否 | `false` | 是否启用安全模式 |
-| `enablePayloadDigest` | `boolean` | 否 | `true` | 是否启用 payload 摘要校验 |
+| `enablePayloadDigest` | `boolean` | 否 | `false` | 是否启用 payload 摘要校验 |
 | `maxTimeSkewMs` | `number` | 否 | `30000` | 时间戳允许偏差 |
 | `replayWindowMs` | `number` | 否 | `120000` | nonce 重放缓存窗口 |
 
@@ -239,12 +239,21 @@ ZMQ 连接地址。
 
 作用：
 
-- 增强 payload 完整性校验
-- 关闭后可减少少量计算开销
+- 为 payload 增加额外摘要校验
+- 开启后会带来额外哈希计算开销
+- 关闭后通常可显著提升加密模式下的吞吐
+
+说明：
+
+- 默认值为 `false`
+- `encrypted=true` 时，ZNL 仍然保留签名、防重放与 AES-GCM 透明加密
+- 由于 AES-GCM 已提供完整性校验，很多高吞吐场景下无需额外开启该选项
 
 建议：
 
-- 生产环境保持 `true`
+- 高吞吐、低延迟优先场景：保持 `false`
+- 对 payload 额外摘要校验有明确需求时，再显式设为 `true`
+- `master` 与 `slave` 两端应保持一致，否则认证会失败
 
 #### `maxTimeSkewMs`
 
@@ -1561,7 +1570,9 @@ ZNL 常见支持以下输入：
 
 - 双方 `encrypted` 必须一致
 - 双方密钥配置必须可匹配
-- 是否启用 `enablePayloadDigest` 最好保持一致
+- `master` 与 `slave` 的 `enablePayloadDigest` 配置必须保持一致
+- 高吞吐场景建议优先使用默认值 `false`
+- 只有在你明确需要额外 payload 摘要校验时再开启 `true`
 
 ### 10.4 监听 `error` 和 `auth_failed`
 

@@ -67,7 +67,6 @@ import {
   digestFrames,
   generateNonce,
   nowMs,
-  canonicalSignInput,
   encodeAuthProofToken,
   decodeAuthProofToken,
   encryptFrames,
@@ -79,6 +78,11 @@ import { SendQueue } from "./SendQueue.js";
 import { ServiceManager } from "./services/ServiceManager.js";
 import { createMasterFsApi } from "./services/fs/master.js";
 import { createSlaveFsApi } from "./services/fs/slave.js";
+
+const SECURITY_ENVELOPE_VERSION_BUFFER = Buffer.from(
+  SECURITY_ENVELOPE_VERSION,
+  "utf8",
+);
 
 export class ZNL extends EventEmitter {
   // ─── 节点配置（构造后只读）────────────────────────────────────────────────
@@ -2001,9 +2005,6 @@ export class ZNL extends EventEmitter {
         : "",
     };
 
-    // 保留 canonical 文本，便于后续排障（签名实际在 token 内完成）
-    canonicalSignInput(envelope);
-
     return encodeAuthProofToken(signKey, envelope);
   }
 
@@ -2115,7 +2116,7 @@ export class ZNL extends EventEmitter {
     const { iv, ciphertext, tag } = encryptFrames(encryptKey, rawFrames, aad);
 
     // 用统一信封包装：version + iv + tag + ciphertext
-    return [Buffer.from(SECURITY_ENVELOPE_VERSION), iv, tag, ciphertext];
+    return [SECURITY_ENVELOPE_VERSION_BUFFER, iv, tag, ciphertext];
   }
 
   /**
@@ -2145,7 +2146,11 @@ export class ZNL extends EventEmitter {
     }
 
     const [version, iv, tag, ciphertext] = payloadFrames;
-    if (String(version?.toString?.() ?? "") !== SECURITY_ENVELOPE_VERSION) {
+    if (
+      !Buffer.isBuffer(version) ||
+      version.length !== SECURITY_ENVELOPE_VERSION_BUFFER.length ||
+      !version.equals(SECURITY_ENVELOPE_VERSION_BUFFER)
+    ) {
       throw new Error("加密信封版本不匹配。");
     }
 

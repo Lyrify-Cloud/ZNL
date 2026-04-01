@@ -223,15 +223,25 @@ export function canonicalSignInput(envelope) {
 }
 
 /**
+ * 计算 HMAC-SHA256 摘要（Buffer）
+ * @param {Buffer|string} signKey
+ * @param {string|Buffer} text
+ * @returns {Buffer}
+ */
+function signBuffer(signKey, text) {
+  return createHmac("sha256", toBuffer(signKey))
+    .update(toBuffer(text))
+    .digest();
+}
+
+/**
  * 对文本计算 HMAC-SHA256 签名（hex）
  * @param {Buffer|string} signKey
  * @param {string|Buffer} text
  * @returns {string}
  */
 export function signText(signKey, text) {
-  return createHmac("sha256", toBuffer(signKey))
-    .update(toBuffer(text))
-    .digest("hex");
+  return signBuffer(signKey, text).toString("hex");
 }
 
 /**
@@ -243,7 +253,7 @@ export function signText(signKey, text) {
  */
 export function verifyTextSignature(signKey, text, signatureHex) {
   try {
-    const expected = Buffer.from(signText(signKey, text), "hex");
+    const expected = signBuffer(signKey, text);
     const provided = Buffer.from(String(signatureHex || ""), "hex");
     if (expected.length !== provided.length) return false;
     return timingSafeEqual(expected, provided);
@@ -538,6 +548,11 @@ export class ReplayGuard {
     /** @type {Map<string, number>} nonce -> expiresAt */
     this._map = new Map();
     this._windowMs = Math.max(10_000, Number(windowMs) || REPLAY_WINDOW_MS);
+    this._sweepIntervalMs = Math.min(
+      this._windowMs,
+      Math.max(1_000, Math.floor(this._windowMs / 4)),
+    );
+    this._nextSweepAt = Date.now() + this._sweepIntervalMs;
   }
 
   /**
@@ -548,6 +563,7 @@ export class ReplayGuard {
     for (const [nonce, expiresAt] of this._map) {
       if (expiresAt <= now) this._map.delete(nonce);
     }
+    this._nextSweepAt = now + this._sweepIntervalMs;
   }
 
   /**
@@ -559,9 +575,15 @@ export class ReplayGuard {
   seenOrAdd(nonce, now = Date.now()) {
     const key = String(nonce ?? "");
     if (!key) return true; // 空 nonce 直接判定异常
-    this.sweep(now);
 
-    if (this._map.has(key)) return true;
+    if (now >= this._nextSweepAt) this.sweep(now);
+
+    const expiresAt = this._map.get(key);
+    if (expiresAt != null) {
+      if (expiresAt > now) return true;
+      this._map.delete(key);
+    }
+
     this._map.set(key, now + this._windowMs);
     return false;
   }
@@ -574,5 +596,6 @@ export class ReplayGuard {
   /** 清空缓存 */
   clear() {
     this._map.clear();
+    this._nextSweepAt = Date.now() + this._sweepIntervalMs;
   }
 }

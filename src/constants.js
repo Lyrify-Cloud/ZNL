@@ -64,7 +64,7 @@ export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 0;
 export const DEFAULT_MAX_PENDING = 1000;
 
 /** 默认是否启用 payload 摘要（安全模式用） */
-export const DEFAULT_ENABLE_PAYLOAD_DIGEST = true;
+export const DEFAULT_ENABLE_PAYLOAD_DIGEST = false;
 
 /** 默认端点配置 */
 export const DEFAULT_ENDPOINTS = {

@@ -559,7 +559,9 @@ master.removeAuthKey("slave-003");
 建议：
 
 - `master` 与 `slave` 的 `encrypted` 配置保持一致
-- 生产环境开启 `enablePayloadDigest: true`
+- `master` 与 `slave` 的 `enablePayloadDigest` 配置保持一致
+- 高吞吐场景建议优先使用默认值 `enablePayloadDigest: false`
+- 只有在你明确需要额外 payload 摘要校验时，再显式开启 `enablePayloadDigest: true`
 - 不要把真实密钥直接提交到公开仓库
 
 ---

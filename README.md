@@ -135,7 +135,7 @@ new ZNL({
   heartbeatInterval: 3000,
   heartbeatTimeoutMs: 0,
   encrypted: false,
-  enablePayloadDigest: true,
+  enablePayloadDigest: false,
   maxTimeSkewMs: 30000,
   replayWindowMs: 120000,
 });
@@ -144,6 +144,12 @@ new ZNL({
 完整参数说明请查看：
 
 - `docs/README.api.md`
+
+性能建议：
+
+- 安全模式默认关闭 `enablePayloadDigest`
+- 如需额外的 payload 摘要一致性校验，可显式设置 `enablePayloadDigest: true`
+- 在高并发短消息场景下，关闭 `enablePayloadDigest` 通常可以获得更高吞吐
 
 ---
 

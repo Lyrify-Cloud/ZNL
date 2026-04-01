@@ -1,5 +1,54 @@
 # 更新日志
 
+## v0.6.4
+
+### 新增
+- 内建独立 `service` 通道，新增 `svc_req` / `svc_res` 底层控制帧，与业务 `req` / `res` 分流。
+- 内建 `fs` 命名空间：
+  - `master.fs.list/get/patch/delete/rename/stat`
+  - `master.fs.upload/download`
+  - `slave.fs.setRoot("./")`
+- 新增通用内部服务管理层，用于承载 `fs` 等不应与业务 RPC 串流的系统能力。
+- 新增独立底层协议文档 `docs/README.protocol.md`，详细说明真实外层控制帧、明文/加密差异、service 通道与 `fs` payload 语义。
+- 集成测试新增 `fs` 内建服务覆盖，包括 plain / encrypted 模式下的 CRUD、patch、upload/download 与 root 越权校验。
+
+### 变更
+- `fs` 文件服务不再复用业务 `ROUTER()` / `DEALER()` 自动处理器，改走内部 service 通道。
+- `fs` 通道在 `encrypted=true` 下复用现有签名、防重放与透明加密链路。
+- README 精简底层协议章节，主 README 仅保留概览并跳转到独立协议文档。
+- `patch` 功能引入 `diff` 依赖并采用原子写入方式覆盖目标文件。
+- upload/download 增加分片传输、ACK 确认、断点续传、临时文件落盘与 session 过期清理。
+
+### 测试
+- 自动执行完整集成测试，当前模块化测试共 176 项全部通过。
+
+## v0.6.3
+
+### 新增
+- 集成测试重构为模块化结构，支持按 `constructor`、`rpc`、`lifecycle`、`pubsub`、`security`、`fs` 分模块执行。
+- 增加集成测试模块运行入口与对应脚本，便于按能力域单独验证。
+- 补充 API 角色限制、默认状态、`request/response` 事件、`null/undefined` payload、`publish` 事件隔离、未设置 `fs root` 等测试覆盖。
+- 将 `PendingManager`、`SendQueue`、安全辅助方法相关的小粒度测试并入统一集成测试体系。
+
+### 变更
+- `test/run.js` 调整为模块化集成测试薄入口。
+- `package.json` 测试脚本统一到集成测试入口，移除独立 `test:unit` 与 `test:all`。
+- 删除 `test/unit` 目录，统一测试组织方式。
+- 优化安全模式下的防重放缓存清理策略，避免高并发场景中按消息频率全量扫描 nonce 表。
+- 移除安全签名热路径中的无效计算，减少加密模式下的额外 CPU 开销。
+- 优化签名校验过程中的中间数据转换，降低 HMAC 校验时的对象分配与编码往返成本。
+- 优化安全信封版本帧的复用与比较逻辑，减少不必要的 `Buffer` 分配与字符串转换。
+- 将 `enablePayloadDigest` 默认值从 `true` 调整为 `false`，提升加密模式下的吞吐表现。
+- README 与 API 文档同步更新，补充 `enablePayloadDigest` 的默认行为、性能建议与配置一致性说明。
+
+### 性能
+- 在 `10000` 并发请求压测中，关闭 `payloadDigest` 的加密模式吞吐从约 `3091 ok/s` 提升至约 `3748 ok/s`，提升约 `21%`。
+- 第一轮安全热路径优化后，加密模式压测吞吐从约 `2771 ok/s` 提升至约 `3258 ok/s`。
+
+### 测试
+- 自动执行完整测试流程，当前集成测试共 176 项全部通过。
+- 已执行一轮默认配置下的加密压测验证，`10000/10000` 请求成功，吞吐约 `3455 ok/s`。
+
 ## v0.6.2
 
 ### 新增
