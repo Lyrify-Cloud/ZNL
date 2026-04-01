@@ -1,5 +1,25 @@
 # 更新日志
 
+## v0.6.5
+
+### 新增
+- 重写 `test/master/index.js`，提供交互式命令行测试，可直接选择目标 `slave` 并执行远端 `fs` 文件管理操作。
+- 重写 `test/slave/index.js`，启用 `slave.fs.setRoot(...)`，默认暴露测试目录供 `master.fs` 访问。
+- `master` / `slave` 测试脚本新增启动参数：
+  - `--encrypted` / `--no-encrypted`
+  - `--json`
+- 新增 `test/README.cli.md`，补充两套测试脚本的命令行使用教程、参数说明、JSON 输出说明与推荐演示流程。
+
+### 变更
+- `master` 测试从定时广播/定时 ping 示例调整为更贴近实际使用的交互式文件管理 CLI。
+- `slave` 测试从通用通信演示调整为面向内建 `fs` 服务的文件管理测试节点。
+- 测试示例默认启用加密，但允许通过参数显式关闭，便于同时验证 plain / encrypted 两种模式。
+- 测试输出增加结构化 JSON 模式，便于后续接入脚本化调用与自动化验证。
+
+### 测试
+- 自动执行 `pnpm test`，当前集成测试共 `193` 项全部通过。
+- 自动执行 `pnpm check`，语法检查通过。
+
 ## v0.6.4
 
 ### 新增

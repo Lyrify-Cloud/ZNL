@@ -468,7 +468,7 @@ function printFullReport(items) {
   }
 
   printComparison(items);
-  printDetailHint();
+  // printDetailHint();
 
   if (FLAG_ERRORS || FLAG_EVENTS) {
     console.log("");

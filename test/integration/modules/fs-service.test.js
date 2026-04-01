@@ -10,6 +10,7 @@ import {
   resetDir,
   safeStop,
   scaleMs,
+  toText,
   waitForSlave,
 } from "../helpers/common.js";
 
@@ -341,6 +342,318 @@ export async function runFsServiceTests(runner) {
         runner.assert(
           downloadedText === "secret-upload-body",
           `encrypted download 内容正确 → "${downloadedText}"`,
+        );
+      } finally {
+        await safeStop(slave, master);
+        await fs.rm(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  await runner.test(
+    "plain 模式：fs 与普通 RPC/PUBLISH/PUSH 并发时互不串线",
+    async () => {
+      const EP_FS_MIXED = "tcp://127.0.0.1:16044";
+      const baseDir = path.resolve("test/tmp/fs-mixed-plain");
+      const rootDir = path.join(baseDir, "remote");
+      const uploadSource = path.join(baseDir, "mixed-upload.txt");
+
+      await resetDir(baseDir);
+      await fs.mkdir(rootDir, { recursive: true });
+      await fs.writeFile(path.join(rootDir, "alpha.txt"), "alpha-body", "utf8");
+      await fs.writeFile(uploadSource, "upload-mixed-body", "utf8");
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-fs-mixed",
+        endpoints: { router: EP_FS_MIXED },
+        maxPending: 200,
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-fs-mixed",
+        endpoints: { router: EP_FS_MIXED },
+        maxPending: 200,
+      });
+
+      const publishLog = [];
+      const pushLog = [];
+
+      master.ROUTER(async ({ payload }) => `MIXED-M:${toText(payload)}`);
+      slave.DEALER(async ({ payload }) => `MIXED-S:${toText(payload)}`);
+      slave.SUBSCRIBE("mixed-news", ({ payload }) =>
+        publishLog.push(toText(payload)),
+      );
+      master.on("push", ({ identityText, topic, payload }) => {
+        pushLog.push(`${identityText}:${topic}:${toText(payload)}`);
+      });
+
+      slave.fs.setRoot(rootDir);
+
+      try {
+        await master.start();
+        await slave.start();
+        await delay(300);
+
+        const registered = await waitForSlave(master, "s-fs-mixed", 3000);
+        runner.assert(
+          registered,
+          `mixed plain slave 已注册 → ${master.slaves}`,
+        );
+
+        const slaveRpcTasks = Array.from({ length: 12 }, (_, i) =>
+          slave.DEALER(`plain-s2m-${i}`, { timeoutMs: scaleMs(3000) }),
+        );
+        const masterRpcTasks = Array.from({ length: 12 }, (_, i) =>
+          master.ROUTER("s-fs-mixed", `plain-m2s-${i}`, {
+            timeoutMs: scaleMs(3000),
+          }),
+        );
+        const fsGetTasks = Array.from({ length: 8 }, () =>
+          master.fs.get("s-fs-mixed", "alpha.txt", {
+            timeoutMs: scaleMs(2500),
+          }),
+        );
+
+        const uploadPromise = master.fs.upload(
+          "s-fs-mixed",
+          uploadSource,
+          "uploaded-mixed.txt",
+          {
+            timeoutMs: scaleMs(3500),
+            chunkSize: 128 * 1024,
+          },
+        );
+
+        const listPromise = master.fs.list("s-fs-mixed", ".", {
+          timeoutMs: scaleMs(2500),
+        });
+
+        const eventsPromise = (async () => {
+          master.PUBLISH("mixed-news", "plain-news-1");
+          slave.PUSH("mixed-metrics", "cpu=0.77");
+          await delay(200);
+        })();
+
+        const [
+          slaveRpcResults,
+          masterRpcResults,
+          fsGetResults,
+          uploadResult,
+          listResult,
+        ] = await Promise.all([
+          Promise.all(slaveRpcTasks),
+          Promise.all(masterRpcTasks),
+          Promise.all(fsGetTasks),
+          uploadPromise,
+          listPromise,
+          eventsPromise,
+        ]);
+
+        runner.assert(
+          slaveRpcResults.every(
+            (value, i) => toText(value) === `MIXED-M:plain-s2m-${i}`,
+          ),
+          `slave→master 并发 RPC 全部正确 → ${slaveRpcResults.length} 条`,
+        );
+
+        runner.assert(
+          masterRpcResults.every(
+            (value, i) => toText(value) === `MIXED-S:plain-m2s-${i}`,
+          ),
+          `master→slave 并发 RPC 全部正确 → ${masterRpcResults.length} 条`,
+        );
+
+        runner.assert(
+          fsGetResults.every(
+            (result) => readFsBodyText(result) === "alpha-body",
+          ),
+          `并发 fs.get 全部正确 → ${fsGetResults.length} 次`,
+        );
+
+        runner.assert(uploadResult.ok === true, "混合场景 upload 完成");
+
+        runner.assert(
+          Array.isArray(listResult.entries) &&
+            listResult.entries.some((entry) => entry.name === "alpha.txt"),
+          `混合场景 list 正常 → ${JSON.stringify(listResult.entries)}`,
+        );
+
+        const uploaded = await master.fs.get(
+          "s-fs-mixed",
+          "uploaded-mixed.txt",
+          {
+            timeoutMs: scaleMs(2500),
+          },
+        );
+        runner.assert(
+          readFsBodyText(uploaded) === "upload-mixed-body",
+          `upload 后文件内容正确 → "${readFsBodyText(uploaded)}"`,
+        );
+
+        runner.assert(
+          publishLog.length === 1 && publishLog[0] === "plain-news-1",
+          `PUBLISH 未被 fs 串线影响 → ${publishLog.join(", ")}`,
+        );
+
+        runner.assert(
+          pushLog.length === 1 &&
+            pushLog[0] === "s-fs-mixed:mixed-metrics:cpu=0.77",
+          `PUSH 未被 fs 串线影响 → ${pushLog.join(", ")}`,
+        );
+      } finally {
+        await safeStop(slave, master);
+        await fs.rm(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  await runner.test(
+    "encrypted 模式：fs 与普通 RPC/PUBLISH/PUSH 并发时互不串线",
+    async () => {
+      const EP_FS_MIXED_ENC = "tcp://127.0.0.1:16045";
+      const KEY = "fs-mixed-encrypted-key";
+      const baseDir = path.resolve("test/tmp/fs-mixed-encrypted");
+      const rootDir = path.join(baseDir, "remote");
+      const uploadSource = path.join(baseDir, "mixed-secure-upload.txt");
+
+      await resetDir(baseDir);
+      await fs.mkdir(rootDir, { recursive: true });
+      await fs.writeFile(
+        path.join(rootDir, "secure-alpha.txt"),
+        "secure-alpha",
+        "utf8",
+      );
+      await fs.writeFile(uploadSource, "secure-upload-mixed", "utf8");
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-fs-mixed-enc",
+        endpoints: { router: EP_FS_MIXED_ENC },
+        authKey: KEY,
+        encrypted: true,
+        maxPending: 200,
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-fs-mixed-enc",
+        endpoints: { router: EP_FS_MIXED_ENC },
+        authKey: KEY,
+        encrypted: true,
+        maxPending: 200,
+      });
+
+      const publishLog = [];
+      const pushLog = [];
+
+      master.ROUTER(async ({ payload }) => `EMIX-M:${toText(payload)}`);
+      slave.DEALER(async ({ payload }) => `EMIX-S:${toText(payload)}`);
+      slave.SUBSCRIBE("enc-mixed-news", ({ payload }) =>
+        publishLog.push(toText(payload)),
+      );
+      master.on("push", ({ identityText, topic, payload }) => {
+        pushLog.push(`${identityText}:${topic}:${toText(payload)}`);
+      });
+
+      slave.fs.setRoot(rootDir);
+
+      try {
+        await master.start();
+        await slave.start();
+        await delay(350);
+
+        const registered = await waitForSlave(master, "s-fs-mixed-enc", 3000);
+        runner.assert(
+          registered,
+          `mixed encrypted slave 已注册 → ${master.slaves}`,
+        );
+
+        const slaveRpcTasks = Array.from({ length: 8 }, (_, i) =>
+          slave.DEALER(`enc-s2m-${i}`, { timeoutMs: scaleMs(3500) }),
+        );
+        const masterRpcTasks = Array.from({ length: 8 }, (_, i) =>
+          master.ROUTER("s-fs-mixed-enc", `enc-m2s-${i}`, {
+            timeoutMs: scaleMs(3500),
+          }),
+        );
+        const fsGetTasks = Array.from({ length: 6 }, () =>
+          master.fs.get("s-fs-mixed-enc", "secure-alpha.txt", {
+            timeoutMs: scaleMs(3000),
+          }),
+        );
+
+        const uploadPromise = master.fs.upload(
+          "s-fs-mixed-enc",
+          uploadSource,
+          "secure-uploaded-mixed.txt",
+          {
+            timeoutMs: scaleMs(4000),
+            chunkSize: 128 * 1024,
+          },
+        );
+
+        const eventsPromise = (async () => {
+          master.PUBLISH("enc-mixed-news", "enc-news-1");
+          slave.PUSH("enc-mixed-metrics", "cpu=0.91");
+          await delay(220);
+        })();
+
+        const [slaveRpcResults, masterRpcResults, fsGetResults, uploadResult] =
+          await Promise.all([
+            Promise.all(slaveRpcTasks),
+            Promise.all(masterRpcTasks),
+            Promise.all(fsGetTasks),
+            uploadPromise,
+            eventsPromise,
+          ]);
+
+        runner.assert(
+          slaveRpcResults.every(
+            (value, i) => toText(value) === `EMIX-M:enc-s2m-${i}`,
+          ),
+          `encrypted slave→master 并发 RPC 全部正确 → ${slaveRpcResults.length} 条`,
+        );
+
+        runner.assert(
+          masterRpcResults.every(
+            (value, i) => toText(value) === `EMIX-S:enc-m2s-${i}`,
+          ),
+          `encrypted master→slave 并发 RPC 全部正确 → ${masterRpcResults.length} 条`,
+        );
+
+        runner.assert(
+          fsGetResults.every(
+            (result) => readFsBodyText(result) === "secure-alpha",
+          ),
+          `encrypted 并发 fs.get 全部正确 → ${fsGetResults.length} 次`,
+        );
+
+        runner.assert(
+          uploadResult.ok === true,
+          "encrypted 混合场景 upload 完成",
+        );
+
+        const uploaded = await master.fs.get(
+          "s-fs-mixed-enc",
+          "secure-uploaded-mixed.txt",
+          {
+            timeoutMs: scaleMs(3000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(uploaded) === "secure-upload-mixed",
+          `encrypted upload 后内容正确 → "${readFsBodyText(uploaded)}"`,
+        );
+
+        runner.assert(
+          publishLog.length === 1 && publishLog[0] === "enc-news-1",
+          `encrypted PUBLISH 未被 fs 串线影响 → ${publishLog.join(", ")}`,
+        );
+
+        runner.assert(
+          pushLog.length === 1 &&
+            pushLog[0] === "s-fs-mixed-enc:enc-mixed-metrics:cpu=0.91",
+          `encrypted PUSH 未被 fs 串线影响 → ${pushLog.join(", ")}`,
         );
       } finally {
         await safeStop(slave, master);
