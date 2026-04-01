@@ -594,15 +594,67 @@ const slave = new ZNL({
   },
 });
 
-slave.fs.setRoot("./storage");
+slave.fs.setRoot("./storage", {
+  readOnly: false,
+  allowDelete: false,
+  allowPatch: true,
+  allowUpload: true,
+  allowedPaths: [
+    "public/**",
+    "configs/**",
+  ],
+  denyGlobs: [
+    "**/*.secret.txt",
+    "private/**",
+  ],
+});
+
 await slave.start();
 ```
 
 说明：
 
-- `setRoot("./storage")` 会把远程访问范围限制到这个目录
+- `setRoot(rootPath, policy?)` 的第一个参数仍然是根目录
+- `policy` 为可选策略对象，用于限制远程文件能力
 - 所有远程路径都只能落在这个根目录下面
+- 任何包含符号链接 / junction 的访问路径都会被拒绝
 - 越权路径会被拒绝
+- `allowedPaths` 与 `denyGlobs` 都按 `/` 风格路径匹配
+- `allowedPaths` 为空时表示不额外限制路径范围
+- `denyGlobs` 命中后会直接拒绝访问
+
+常用策略字段：
+
+- `readOnly: true`
+  - 进入只读模式
+  - 会拒绝 `patch / rename / delete / upload`
+- `allowDelete: false`
+  - 禁止远端删除
+- `allowPatch: false`
+  - 禁止远端 patch 文本文件
+- `allowUpload: false`
+  - 禁止远端上传
+- `allowedPaths: [...]`
+  - 路径白名单
+- `denyGlobs: [...]`
+  - 路径黑名单
+
+一个更保守的只读示例：
+
+```js
+slave.fs.setRoot("./storage", {
+  readOnly: true,
+  allowedPaths: [
+    "public/**",
+    "docs/**",
+  ],
+  denyGlobs: [
+    "**/*.key",
+    "**/*.pem",
+    "**/*.secret.*",
+  ],
+});
+```
 
 ---
 
@@ -866,7 +918,21 @@ const slave = new ZNL({
   },
 });
 
-slave.fs.setRoot("./storage");
+slave.fs.setRoot("./storage", {
+  allowDelete: false,
+  allowPatch: true,
+  allowUpload: true,
+  allowedPaths: [
+    "config/**",
+    "assets/**",
+    "logs/**",
+  ],
+  denyGlobs: [
+    "**/*.bak",
+    "**/*.secret.txt",
+  ],
+});
+
 await slave.start();
 
 console.log("slave fs ready");
@@ -964,7 +1030,20 @@ const slave = new ZNL({
   encrypted: true,
 });
 
-slave.fs.setRoot("./storage");
+slave.fs.setRoot("./storage", {
+  readOnly: true,
+  allowedPaths: [
+    "public/**",
+    "release/**",
+  ],
+  denyGlobs: [
+    "**/*.pem",
+    "**/*.key",
+    "**/*.secret.*",
+    "private/**",
+  ],
+});
+
 await slave.start();
 ```
 
@@ -1253,6 +1332,9 @@ slave.isMasterOnline() === true
 - 目标路径是否超出 `root`
 - `slaveId` 是否正确
 - 路径是否使用了错误的相对层级
+- 路径是否命中了 `allowedPaths` / `denyGlobs` 策略
+- 是否处于 `readOnly=true` 或 `allowDelete=false` / `allowPatch=false` / `allowUpload=false`
+- 目标路径链路中是否包含符号链接 / junction
 
 ### 31.4 大文件读写问题
 

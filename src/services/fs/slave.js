@@ -10,14 +10,7 @@ import {
   toSessionId,
 } from "./protocol.js";
 
-import {
-  assertRoot,
-  toSafePath,
-  ensureDir,
-  statSafe,
-  sanitizeListEntry,
-  pathExists,
-} from "./utils.js";
+import { assertRoot, ensureDir, pathExists, statSafe } from "./utils.js";
 
 function ensureSlave(instance) {
   if (!instance || instance.role !== "slave") {
@@ -32,8 +25,10 @@ function normalizeChunkSize(size) {
 }
 
 function normalizeClientPath(inputPath) {
-  const raw = String(inputPath ?? "");
-  if (!raw) return raw;
+  const raw = String(inputPath ?? "").trim();
+  if (!raw) {
+    throw new Error("path 不能为空。");
+  }
 
   if (path.isAbsolute(raw)) {
     const root = path.parse(raw).root;
@@ -41,11 +36,6 @@ function normalizeClientPath(inputPath) {
   }
 
   return raw;
-}
-
-function safePath(root, inputPath) {
-  const normalized = normalizeClientPath(inputPath);
-  return toSafePath(root, normalized);
 }
 
 function okMeta(op, extra = {}) {
@@ -83,8 +73,20 @@ async function writeChunk(tmpPath, offset, chunk) {
   }
 }
 
+async function lstatSafe(targetPath) {
+  try {
+    return await fs.lstat(targetPath);
+  } catch {
+    return null;
+  }
+}
+
 async function removeIfExists(targetPath) {
-  if (!(await pathExists(targetPath))) return;
+  const stat = await lstatSafe(targetPath);
+  if (!stat) return;
+  if (stat.isSymbolicLink()) {
+    throw new Error("拒绝操作符号链接。");
+  }
   await fs.rm(targetPath, { force: true, recursive: true });
 }
 
@@ -96,6 +98,238 @@ function normalizePatchText(rawPatch) {
     .replace(/\s+$/u, "");
 }
 
+function normalizePolicy(policy = {}) {
+  if (!policy || typeof policy !== "object") {
+    return {
+      readOnly: false,
+      allowDelete: true,
+      allowPatch: true,
+      allowUpload: true,
+      allowedPaths: [],
+      denyGlobs: [],
+    };
+  }
+
+  const toList = (value) =>
+    Array.isArray(value)
+      ? value
+          .filter((item) => item != null && String(item).trim())
+          .map((item) => toPosixPath(String(item).trim()))
+      : [];
+
+  return {
+    readOnly: Boolean(policy.readOnly),
+    allowDelete:
+      policy.allowDelete == null ? true : Boolean(policy.allowDelete),
+    allowPatch: policy.allowPatch == null ? true : Boolean(policy.allowPatch),
+    allowUpload:
+      policy.allowUpload == null ? true : Boolean(policy.allowUpload),
+    allowedPaths: toList(policy.allowedPaths),
+    denyGlobs: toList(policy.denyGlobs),
+  };
+}
+
+function toPosixPath(value) {
+  return String(value ?? "").replace(/[\\/]+/g, "/");
+}
+
+function escapeRegex(text) {
+  return String(text).replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function globToRegExp(glob) {
+  const normalized = toPosixPath(glob);
+  let pattern = "^";
+  for (let i = 0; i < normalized.length; i += 1) {
+    const ch = normalized[i];
+    const next = normalized[i + 1];
+
+    if (ch === "*") {
+      if (next === "*") {
+        pattern += ".*";
+        i += 1;
+      } else {
+        pattern += "[^/]*";
+      }
+      continue;
+    }
+
+    if (ch === "?") {
+      pattern += "[^/]";
+      continue;
+    }
+
+    pattern += escapeRegex(ch);
+  }
+  pattern += "$";
+  return new RegExp(pattern);
+}
+
+function matchesGlob(glob, value) {
+  return globToRegExp(glob).test(toPosixPath(value));
+}
+
+function isPathAllowedByList(relativePath, allowedPaths) {
+  if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) return true;
+
+  const target = toPosixPath(relativePath).replace(/^\/+/, "");
+  return allowedPaths.some((entry) => {
+    const normalized = toPosixPath(entry)
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "");
+
+    if (!normalized) return true;
+
+    if (normalized.includes("*") || normalized.includes("?")) {
+      if (matchesGlob(normalized, target)) return true;
+
+      const prefix = normalized.replace(/\/+(?:\*\*|\*)$/u, "");
+      if (prefix && (target === prefix || target.startsWith(`${prefix}/`))) {
+        return true;
+      }
+
+      return false;
+    }
+
+    return target === normalized || target.startsWith(`${normalized}/`);
+  });
+}
+
+function isPathDeniedByGlobs(relativePath, denyGlobs) {
+  if (!Array.isArray(denyGlobs) || denyGlobs.length === 0) return false;
+  const target = toPosixPath(relativePath).replace(/^\/+/, "");
+  return denyGlobs.some((glob) => matchesGlob(glob, target));
+}
+
+function sanitizeListEntry(entry, stats) {
+  return {
+    name: entry.name,
+    type: stats?.isSymbolicLink()
+      ? "symlink"
+      : entry.isDirectory()
+        ? "dir"
+        : "file",
+    size: stats?.size ?? 0,
+    mtime: stats?.mtimeMs ?? 0,
+    isFile: Boolean(stats?.isFile?.()),
+    isDirectory: Boolean(stats?.isDirectory?.()),
+    isSymbolicLink: Boolean(stats?.isSymbolicLink?.()),
+  };
+}
+
+async function ensureNoSymlinkInPath(
+  base,
+  target,
+  { allowMissingLeaf = false } = {},
+) {
+  const resolvedBase = assertRoot(base);
+  const resolvedTarget = path.resolve(target);
+
+  const normalizedBase = resolvedBase.endsWith(path.sep)
+    ? resolvedBase
+    : `${resolvedBase}${path.sep}`;
+
+  if (
+    resolvedTarget !== resolvedBase &&
+    !resolvedTarget.startsWith(normalizedBase)
+  ) {
+    throw new Error("路径越权：目标不在 root 范围内。");
+  }
+
+  const relative = path.relative(resolvedBase, resolvedTarget);
+  const segments = relative
+    .split(path.sep)
+    .filter((segment) => segment && segment !== ".");
+
+  let current = resolvedBase;
+  const baseStat = await lstatSafe(current);
+  if (!baseStat) {
+    throw new Error("fs root 不存在。");
+  }
+  if (baseStat.isSymbolicLink()) {
+    throw new Error("fs root 不能是符号链接。");
+  }
+
+  for (let i = 0; i < segments.length; i += 1) {
+    current = path.join(current, segments[i]);
+    const stat = await lstatSafe(current);
+
+    if (!stat) {
+      if (allowMissingLeaf && i === segments.length - 1) {
+        return resolvedTarget;
+      }
+      throw new Error("目标不存在。");
+    }
+
+    if (stat.isSymbolicLink()) {
+      throw new Error("路径越权：路径中包含符号链接。");
+    }
+  }
+
+  return resolvedTarget;
+}
+
+async function resolveSafePath(root, inputPath, options = {}) {
+  const normalized = normalizeClientPath(inputPath);
+  const target = path.resolve(root, normalized);
+  const safe = await ensureNoSymlinkInPath(root, target, options);
+
+  return {
+    relativePath: toPosixPath(path.relative(root, safe) || "."),
+    absolutePath: safe,
+  };
+}
+
+async function resolveSafeParentPath(root, inputPath) {
+  const normalized = normalizeClientPath(inputPath);
+  const target = path.resolve(root, normalized);
+
+  const normalizedBase = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (target !== root && !target.startsWith(normalizedBase)) {
+    throw new Error("路径越权：目标不在 root 范围内。");
+  }
+
+  const parent = path.dirname(target);
+  await ensureNoSymlinkInPath(root, parent, { allowMissingLeaf: false });
+
+  return {
+    relativePath: toPosixPath(path.relative(root, target) || "."),
+    absolutePath: target,
+  };
+}
+
+function enforcePathPolicy(policy, relativePath, { op, write = false } = {}) {
+  const normalized = toPosixPath(relativePath).replace(/^\/+/, "");
+
+  if (!isPathAllowedByList(normalized, policy.allowedPaths)) {
+    throw new Error(
+      `访问被策略拒绝：路径不在 allowedPaths 范围内（op=${op}）。`,
+    );
+  }
+
+  if (isPathDeniedByGlobs(normalized, policy.denyGlobs)) {
+    throw new Error(`访问被策略拒绝：路径命中 denyGlobs（op=${op}）。`);
+  }
+
+  if (write && policy.readOnly) {
+    throw new Error(`访问被策略拒绝：当前 fs root 为只读模式（op=${op}）。`);
+  }
+
+  if (write && op === OPS.DELETE && !policy.allowDelete) {
+    throw new Error("访问被策略拒绝：allowDelete=false。");
+  }
+
+  if (write && op === OPS.PATCH && !policy.allowPatch) {
+    throw new Error("访问被策略拒绝：allowPatch=false。");
+  }
+
+  if (write && (op === OPS.INIT || op === OPS.CHUNK || op === OPS.COMPLETE)) {
+    if (!policy.allowUpload) {
+      throw new Error("访问被策略拒绝：allowUpload=false。");
+    }
+  }
+}
+
 export function createSlaveFsApi(slave) {
   ensureSlave(slave);
 
@@ -104,6 +338,7 @@ export function createSlaveFsApi(slave) {
   let cleanupTimer = null;
   let serviceRegistered = false;
   let serviceHandler = null;
+  let policy = normalizePolicy();
 
   const SESSION_TTL_MS = 30 * 60 * 1000;
 
@@ -169,20 +404,47 @@ export function createSlaveFsApi(slave) {
     return rootDir;
   }
 
-  async function handleList(meta) {
+  async function resolveReadPath(inputPath, op) {
     const root = ensureRootConfigured();
-    const target = safePath(root, meta.path);
-    const stat = await fs.stat(target);
+    const resolved = await resolveSafePath(root, inputPath, {
+      allowMissingLeaf: false,
+    });
+    enforcePathPolicy(policy, resolved.relativePath, { op, write: false });
+    return resolved;
+  }
+
+  async function resolveWritePath(
+    inputPath,
+    op,
+    { allowMissingLeaf = false } = {},
+  ) {
+    const root = ensureRootConfigured();
+    const resolved = allowMissingLeaf
+      ? await resolveSafeParentPath(root, inputPath)
+      : await resolveSafePath(root, inputPath, { allowMissingLeaf: false });
+
+    enforcePathPolicy(policy, resolved.relativePath, { op, write: true });
+    return resolved;
+  }
+
+  async function handleList(meta) {
+    const targetInfo = await resolveReadPath(meta.path, OPS.LIST);
+    const stat = await fs.lstat(targetInfo.absolutePath);
+    if (stat.isSymbolicLink()) {
+      throw new Error("拒绝访问符号链接目录。");
+    }
     if (!stat.isDirectory()) {
       throw new Error("目标不是目录。");
     }
 
-    const entries = await fs.readdir(target, { withFileTypes: true });
+    const entries = await fs.readdir(targetInfo.absolutePath, {
+      withFileTypes: true,
+    });
     const result = [];
 
     for (const entry of entries) {
-      const full = path.join(target, entry.name);
-      const childStat = await statSafe(full);
+      const full = path.join(targetInfo.absolutePath, entry.name);
+      const childStat = await lstatSafe(full);
       result.push(sanitizeListEntry(entry, childStat));
     }
 
@@ -195,9 +457,12 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handleStat(meta) {
-    const root = ensureRootConfigured();
-    const target = safePath(root, meta.path);
-    const stat = await fs.stat(target);
+    const targetInfo = await resolveReadPath(meta.path, OPS.STAT);
+    const stat = await fs.lstat(targetInfo.absolutePath);
+
+    if (stat.isSymbolicLink()) {
+      throw new Error("拒绝访问符号链接。");
+    }
 
     return buildRpcPayload(
       okMeta(OPS.STAT, {
@@ -211,15 +476,17 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handleGet(meta) {
-    const root = ensureRootConfigured();
-    const target = safePath(root, meta.path);
-    const stat = await fs.stat(target);
+    const targetInfo = await resolveReadPath(meta.path, OPS.GET);
+    const stat = await fs.lstat(targetInfo.absolutePath);
 
+    if (stat.isSymbolicLink()) {
+      throw new Error("拒绝读取符号链接。");
+    }
     if (!stat.isFile()) {
       throw new Error("目标不是文件。");
     }
 
-    const buffer = await fs.readFile(target);
+    const buffer = await fs.readFile(targetInfo.absolutePath);
     return buildRpcPayload(
       okMeta(OPS.GET, {
         path: String(meta.path ?? ""),
@@ -230,10 +497,9 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handleDelete(meta) {
-    const root = ensureRootConfigured();
-    const target = safePath(root, meta.path);
+    const targetInfo = await resolveWritePath(meta.path, OPS.DELETE);
 
-    await fs.rm(target, { recursive: true, force: true });
+    await removeIfExists(targetInfo.absolutePath);
 
     return buildRpcPayload(
       okMeta(OPS.DELETE, {
@@ -243,12 +509,23 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handleRename(meta) {
-    const root = ensureRootConfigured();
-    const fromPath = safePath(root, meta.from);
-    const toPath = safePath(root, meta.to);
+    const fromInfo = await resolveWritePath(meta.from, OPS.RENAME);
+    const toInfo = await resolveWritePath(meta.to, OPS.RENAME, {
+      allowMissingLeaf: true,
+    });
 
-    await ensureDir(path.dirname(toPath));
-    await fs.rename(fromPath, toPath);
+    const fromStat = await fs.lstat(fromInfo.absolutePath);
+    if (fromStat.isSymbolicLink()) {
+      throw new Error("拒绝重命名符号链接。");
+    }
+
+    const existingToStat = await lstatSafe(toInfo.absolutePath);
+    if (existingToStat?.isSymbolicLink()) {
+      throw new Error("拒绝覆盖符号链接。");
+    }
+
+    await ensureDir(path.dirname(toInfo.absolutePath));
+    await fs.rename(fromInfo.absolutePath, toInfo.absolutePath);
 
     return buildRpcPayload(
       okMeta(OPS.RENAME, {
@@ -259,15 +536,17 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handlePatch(meta) {
-    const root = ensureRootConfigured();
-    const target = safePath(root, meta.path);
-    const stat = await fs.stat(target);
+    const targetInfo = await resolveWritePath(meta.path, OPS.PATCH);
+    const stat = await fs.lstat(targetInfo.absolutePath);
 
+    if (stat.isSymbolicLink()) {
+      throw new Error("拒绝修改符号链接。");
+    }
     if (!stat.isFile()) {
       throw new Error("目标不是文件。");
     }
 
-    const content = await fs.readFile(target, "utf8");
+    const content = await fs.readFile(targetInfo.absolutePath, "utf8");
     const patchText = normalizePatchText(meta.patch);
     const normalizedContent = content.replace(/\r\n/g, "\n");
 
@@ -293,9 +572,9 @@ export function createSlaveFsApi(slave) {
       );
     }
 
-    const tmpPath = `${target}.patch.tmp`;
+    const tmpPath = `${targetInfo.absolutePath}.patch.tmp`;
     await fs.writeFile(tmpPath, patched, "utf8");
-    await fs.rename(tmpPath, target);
+    await fs.rename(tmpPath, targetInfo.absolutePath);
 
     return buildRpcPayload(
       okMeta(OPS.PATCH, {
@@ -306,11 +585,17 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handleInit(meta) {
-    const root = ensureRootConfigured();
     const sessionId = toSessionId(meta.sessionId);
     const chunkSize = normalizeChunkSize(meta.chunkSize);
-    const targetPath = safePath(root, meta.path);
-    const tmpPath = `${targetPath}.tmp`;
+    const targetInfo = await resolveWritePath(meta.path, OPS.INIT, {
+      allowMissingLeaf: true,
+    });
+    const tmpPath = `${targetInfo.absolutePath}.tmp`;
+
+    const tmpExisting = await lstatSafe(tmpPath);
+    if (tmpExisting?.isSymbolicLink()) {
+      throw new Error("拒绝写入符号链接临时文件。");
+    }
 
     await openOrCreateTmpFile(tmpPath);
     const offset = await getTmpSize(tmpPath);
@@ -320,7 +605,8 @@ export function createSlaveFsApi(slave) {
       createSession({
         mode: "upload",
         sessionId,
-        targetPath,
+        targetPath: targetInfo.absolutePath,
+        relativePath: targetInfo.relativePath,
         tmpPath,
         chunkSize,
         fileSize: Number(meta.fileSize ?? 0),
@@ -344,6 +630,11 @@ export function createSlaveFsApi(slave) {
     if (!session || session.mode !== "upload") {
       throw new Error("upload session 不存在或已过期。");
     }
+
+    enforcePathPolicy(policy, session.relativePath, {
+      op: OPS.CHUNK,
+      write: true,
+    });
 
     touchSession(session);
 
@@ -393,6 +684,21 @@ export function createSlaveFsApi(slave) {
       throw new Error("upload session 不存在或已过期。");
     }
 
+    enforcePathPolicy(policy, session.relativePath, {
+      op: OPS.COMPLETE,
+      write: true,
+    });
+
+    const tmpStat = await lstatSafe(session.tmpPath);
+    if (tmpStat?.isSymbolicLink()) {
+      throw new Error("拒绝完成符号链接上传。");
+    }
+
+    const targetStat = await lstatSafe(session.targetPath);
+    if (targetStat?.isSymbolicLink()) {
+      throw new Error("拒绝覆盖符号链接。");
+    }
+
     await ensureDir(path.dirname(session.targetPath));
     await removeIfExists(session.targetPath);
     await fs.rename(session.tmpPath, session.targetPath);
@@ -409,12 +715,14 @@ export function createSlaveFsApi(slave) {
   }
 
   async function handleDownloadInit(meta) {
-    const root = ensureRootConfigured();
     const sessionId = toSessionId(meta.sessionId);
     const chunkSize = normalizeChunkSize(meta.chunkSize);
-    const targetPath = safePath(root, meta.path);
+    const targetInfo = await resolveReadPath(meta.path, OPS.DOWNLOAD_INIT);
 
-    const stat = await fs.stat(targetPath);
+    const stat = await fs.lstat(targetInfo.absolutePath);
+    if (stat.isSymbolicLink()) {
+      throw new Error("拒绝下载符号链接。");
+    }
     if (!stat.isFile()) {
       throw new Error("目标不是文件。");
     }
@@ -433,7 +741,8 @@ export function createSlaveFsApi(slave) {
       createSession({
         mode: "download",
         sessionId,
-        targetPath,
+        targetPath: targetInfo.absolutePath,
+        relativePath: targetInfo.relativePath,
         chunkSize,
         fileSize,
       }),
@@ -458,6 +767,11 @@ export function createSlaveFsApi(slave) {
       throw new Error("download session 不存在或已过期。");
     }
 
+    enforcePathPolicy(policy, session.relativePath, {
+      op: OPS.DOWNLOAD_CHUNK,
+      write: false,
+    });
+
     touchSession(session);
 
     const offset = Number(meta.offset ?? 0);
@@ -467,6 +781,11 @@ export function createSlaveFsApi(slave) {
 
     if (offset > session.fileSize) {
       throw new Error("download offset 超出文件大小。");
+    }
+
+    const fileStat = await fs.lstat(session.targetPath);
+    if (fileStat.isSymbolicLink()) {
+      throw new Error("拒绝读取符号链接。");
     }
 
     const size = Math.min(session.chunkSize, session.fileSize - offset);
@@ -528,6 +847,7 @@ export function createSlaveFsApi(slave) {
       op: meta?.op ?? "",
       path: meta?.path ?? "",
       meta,
+      policy: { ...policy },
     });
 
     switch (meta?.op) {
@@ -578,14 +898,12 @@ export function createSlaveFsApi(slave) {
   };
 
   const api = {
-    setRoot(rootPath) {
+    setRoot(rootPath, nextPolicy = {}) {
       rootDir = assertRoot(rootPath);
+      policy = normalizePolicy(nextPolicy);
       ensureCleanupTimer();
 
-      if (
-        !serviceRegistered &&
-        typeof slave.registerService === "function"
-      ) {
+      if (!serviceRegistered && typeof slave.registerService === "function") {
         slave.registerService("fs", serviceHandler);
         serviceRegistered = true;
       }
@@ -595,6 +913,10 @@ export function createSlaveFsApi(slave) {
 
     getRoot() {
       return rootDir;
+    },
+
+    getPolicy() {
+      return { ...policy };
     },
 
     isEnabled() {

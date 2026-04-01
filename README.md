@@ -200,7 +200,7 @@ ZNL 内建了一个独立于业务 RPC 的文件服务通道：
 
 ### 启用方式
 
-`slave` 侧只需要设置根目录：
+`slave` 侧通过 `slave.fs.setRoot(rootPath, policy?)` 设置根目录并启用内建 `fs` 服务：
 
 ```js
 const slave = new ZNL({
@@ -211,13 +211,58 @@ const slave = new ZNL({
   },
 });
 
-slave.fs.setRoot("./storage");
+slave.fs.setRoot("./storage", {
+  readOnly: false,
+  allowDelete: true,
+  allowPatch: true,
+  allowUpload: true,
+  allowedPaths: ["public/**", "configs/app.json"],
+  denyGlobs: ["**/*.secret.txt", "private/**"],
+});
+
 await slave.start();
 ```
 
+说明：
+
+- `rootPath` 会被解析为绝对路径，并作为所有远端文件访问的根目录
+- `policy` 为可选策略对象；不传时，默认允许根目录内的常规读写操作
+- 所有远端路径都必须落在 `rootPath` 范围内
+- 当前实现会拒绝穿过符号链接（Linux/macOS symlink）或目录联接（Windows junction）的访问，避免通过链接跳出 `root`
+- 如果路径命中 `allowedPaths` / `denyGlobs` 或写操作策略限制，请求会被直接拒绝
+
+`policy` 支持以下字段：
+
+- `readOnly: boolean`
+  - 设为 `true` 时，拒绝所有写操作
+  - 当前会拦截：`patch / delete / rename / upload`
+- `allowDelete: boolean`
+  - 是否允许 `master.fs.delete()`
+  - 默认 `true`
+- `allowPatch: boolean`
+  - 是否允许 `master.fs.patch()`
+  - 默认 `true`
+- `allowUpload: boolean`
+  - 是否允许 `master.fs.upload()`
+  - 默认 `true`
+- `allowedPaths: string[]`
+  - 可选白名单路径/模式
+  - 非空时，只有命中的路径才允许访问
+  - 支持目录前缀和 glob 风格，例如：`"public"`, `"public/**"`, `"configs/*.json"`
+- `denyGlobs: string[]`
+  - 可选黑名单 glob
+  - 命中后直接拒绝访问
+  - 例如：`"**/*.secret.txt"`, `"private/**"`
+
+建议：
+
+- 在 `start()` 前调用 `slave.fs.setRoot(...)`
+- 生产环境优先配合 `encrypted=true`
+- 对外提供远程文件能力时，优先使用最小权限策略，例如只读模式或显式白名单
+
 ### 主要 API
 
-- `slave.fs.setRoot(rootPath)`
+- `slave.fs.setRoot(rootPath, policy?)`
 - `master.fs.list(slaveId, path, options?)`
 - `master.fs.get(slaveId, path, options?)`
 - `master.fs.patch(slaveId, path, unifiedDiff, options?)`

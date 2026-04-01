@@ -782,7 +782,7 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 
 ---
 
-### 7.1 `slave.fs.setRoot(rootPath)`
+### 7.1 `slave.fs.setRoot(rootPath, policy?)`
 
 仅 `slave` 侧使用。
 
@@ -790,24 +790,148 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 
 - 设置文件服务根目录
 - 启用当前节点的内建 `fs` 服务
+- 可选配置当前根目录对应的访问策略
 
 #### 参数
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `rootPath` | `string` | 是 | 文件服务根目录 |
+| `policy` | `object` | 否 | 文件服务策略配置 |
 
-行为说明：
+#### `policy` 可选字段
 
-- 必须传入非空路径
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `readOnly` | `boolean` | `false` | 是否开启只读模式；开启后会拒绝所有写操作 |
+| `allowDelete` | `boolean` | `true` | 是否允许 `master.fs.delete()` |
+| `allowPatch` | `boolean` | `true` | 是否允许 `master.fs.patch()` |
+| `allowUpload` | `boolean` | `true` | 是否允许 `master.fs.upload()` |
+| `allowedPaths` | `string[]` | `[]` | 路径白名单；非空时，只有命中的路径才允许访问 |
+| `denyGlobs` | `string[]` | `[]` | 拒绝规则；命中后直接拒绝访问 |
+
+#### `policy` 的真实行为
+
+1. `readOnly: true`
+
+会拒绝所有写操作，包括：
+
+- `master.fs.patch()`
+- `master.fs.delete()`
+- `master.fs.rename()`
+- `master.fs.upload()`
+
+并且：
+
+- `readOnly=true` 时，`allowDelete / allowPatch / allowUpload` 会被视为不可用
+- `list()` / `stat()` / `get()` / `download()` 仍允许执行
+
+2. `allowDelete: false`
+
+会拒绝：
+
+- `master.fs.delete()`
+
+3. `allowPatch: false`
+
+会拒绝：
+
+- `master.fs.patch()`
+
+4. `allowUpload: false`
+
+会拒绝：
+
+- `master.fs.upload()`
+
+5. `allowedPaths`
+
+用于限制允许访问的路径范围。
+
+特点：
+
+- 传空数组表示不额外限制
+- 传非空数组后，只有命中的路径才允许访问
+- 支持目录前缀写法，也兼容简单 glob 风格写法
+- 例如 `public`、`public/**` 都可用于限制只允许访问 `public` 目录及其子路径
+
+6. `denyGlobs`
+
+用于配置显式拒绝规则。
+
+特点：
+
+- 命中后会直接拒绝访问
+- 优先作为“黑名单”使用
+- 支持常见 glob 形式，例如：
+  - `**/*.secret.txt`
+  - `private/**`
+
+#### 行为说明
+
+- `rootPath` 必须传入非空路径
 - 内部会解析为绝对路径
 - 所有远程访问都会限制在该目录下
 - 越权路径会被拒绝
+- 当前实现会拒绝通过符号链接访问目标
+- 如果路径中任何已有层级是符号链接，访问会被拒绝
+- `fs root` 自身也不能是符号链接
+- `list()` 返回目录项时，仍可能显示 `type: "symlink"`，但后续访问该链接目标会被拒绝
+
+#### 关于符号链接 / junction 的真实安全行为
+
+当前实现会在服务端访问路径时做额外保护：
+
+- 不仅检查路径字符串是否落在 `rootPath` 内
+- 还会检查访问路径的已有层级中是否包含符号链接
+- 因此会拒绝通过 root 内部的 symlink / junction 间接跳到 root 外部
+
+这意味着以下场景会被拒绝：
+
+- `root` 内某个目录项是符号链接
+- 该符号链接指向 `root` 外的文件或目录
+- 再通过 `master.fs.get()` / `stat()` / `download()` / `list()` 等尝试访问它
+
+#### 失败时的典型错误原因
+
+常见拒绝原因包括：
+
+- 路径越权：目标不在 root 范围内
+- 路径中包含符号链接
+- 当前 fs root 为只读模式
+- 路径不在 `allowedPaths` 范围内
+- 路径命中 `denyGlobs`
+- `allowDelete=false`
+- `allowPatch=false`
+- `allowUpload=false`
 
 建议：
 
 - 在 `start()` 前调用
 - 为每个 `slave` 配置明确的隔离目录
+- 生产环境建议优先配合 `encrypted=true`
+- 如果暴露的是共享目录，建议显式设置策略而不是只依赖根目录隔离
+
+#### 示例
+
+```/dev/null/example.js#L1-18
+const slave = new ZNL({
+  role: "slave",
+  id: "slave-001",
+  endpoints: {
+    router: "tcp://127.0.0.1:6003",
+  },
+});
+
+slave.fs.setRoot("./storage", {
+  readOnly: false,
+  allowDelete: false,
+  allowPatch: true,
+  allowUpload: true,
+  allowedPaths: ["public/**", "configs"],
+  denyGlobs: ["**/*.secret.txt", "private/**"],
+});
+```
 
 ---
 
@@ -1328,6 +1452,26 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 
 - 所有远端路径都必须在 `slave.fs.setRoot()` 指定根目录内
 - 任何试图越界的路径访问都应被视为非法请求
+- 当前实现不仅拦截 `../` 形式的普通越界
+- 也会拒绝通过 root 内部符号链接 / junction 间接访问 root 外部
+- 因此如果目标路径的已有层级中包含符号链接，服务端会直接拒绝访问
+
+#### 策略建议
+
+如果你需要更严格的控制，建议显式配置 `policy`：
+
+- 纯查看场景：`readOnly: true`
+- 禁止远端删除：`allowDelete: false`
+- 禁止远端 patch：`allowPatch: false`
+- 禁止远端上传：`allowUpload: false`
+- 只暴露指定目录：`allowedPaths: ["public/**"]`
+- 屏蔽敏感文件：`denyGlobs: ["**/*.secret.txt", "private/**"]`
+
+推荐思路：
+
+- 根目录隔离负责“大范围边界”
+- `allowedPaths` / `denyGlobs` 负责“细粒度收缩”
+- 高风险场景优先启用 `readOnly`
 
 #### 安全模式
 
@@ -1335,6 +1479,7 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 
 - `fs` 同样要求双方密钥配置一致
 - 与业务流一样受到签名、防重放和加密保护
+- 但加密并不能替代路径策略与最小权限配置
 
 ---
 

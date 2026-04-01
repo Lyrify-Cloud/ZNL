@@ -16,6 +16,49 @@ import {
 
 installTimeoutScaling();
 
+async function expectRejected(action, messageIncludes = []) {
+  let error = null;
+  try {
+    await action();
+  } catch (thrown) {
+    error = thrown;
+  }
+
+  const text = String(error?.message ?? error ?? "");
+  return {
+    error,
+    message: text,
+    matched:
+      !messageIncludes.length ||
+      messageIncludes.some((part) => text.includes(String(part))),
+  };
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createDirectoryEscapeLink(linkPath, targetDir) {
+  await fs.rm(linkPath, { recursive: true, force: true }).catch(() => {});
+
+  const type = process.platform === "win32" ? "junction" : "dir";
+  try {
+    await fs.symlink(targetDir, linkPath, type);
+    return { created: true, mode: type };
+  } catch (error) {
+    return {
+      created: false,
+      mode: type,
+      reason: String(error?.message ?? error),
+    };
+  }
+}
+
 export async function runFsServiceTests(runner) {
   runner.section("fs 内建服务");
 
@@ -202,19 +245,15 @@ export async function runFsServiceTests(runner) {
       await slave.start();
       await delay(250);
 
-      let error = null;
-      try {
-        await master.fs.get("s-fs-boundary", "../outside.txt", {
-          timeoutMs: scaleMs(1500),
-        });
-      } catch (thrown) {
-        error = thrown;
-      }
-
-      runner.assert(
-        String(error?.message ?? error).includes("路径越权"),
-        `越权访问被拒绝 → "${error?.message ?? error}"`,
+      const result = await expectRejected(
+        () =>
+          master.fs.get("s-fs-boundary", "../outside.txt", {
+            timeoutMs: scaleMs(1500),
+          }),
+        ["路径越权"],
       );
+
+      runner.assert(result.matched, `越权访问被拒绝 → "${result.message}"`);
     } finally {
       await safeStop(slave, master);
       await fs.rm(baseDir, { recursive: true, force: true });
@@ -240,26 +279,426 @@ export async function runFsServiceTests(runner) {
       await slave.start();
       await delay(250);
 
-      let error = null;
-      try {
-        await master.fs.list("s-fs-no-root", ".", {
-          timeoutMs: scaleMs(1500),
-        });
-      } catch (thrown) {
-        error = thrown;
-      }
+      const result = await expectRejected(
+        () =>
+          master.fs.list("s-fs-no-root", ".", {
+            timeoutMs: scaleMs(1500),
+          }),
+        ["fs root", "setRoot", "未注册的 service：fs"],
+      );
 
-      const message = String(error?.message ?? error);
       runner.assert(
-        message.includes("fs root") ||
-          message.includes("setRoot") ||
-          message.includes("未注册的 service：fs"),
-        `未配置 root 时返回明确错误 → "${message}"`,
+        result.matched,
+        `未配置 root 时返回明确错误 → "${result.message}"`,
       );
     } finally {
       await safeStop(slave, master);
     }
   });
+
+  await runner.test(
+    "plain 模式：fs 应拒绝通过 symlink / junction 越界访问 root 外文件",
+    async () => {
+      const EP_FS_SYMLINK = "tcp://127.0.0.1:16046";
+      const baseDir = path.resolve("test/tmp/fs-symlink-escape");
+      const rootDir = path.join(baseDir, "remote");
+      const outsideDir = path.join(baseDir, "outside");
+      const linkDir = path.join(rootDir, "escape-dir");
+      const downloadTarget = path.join(baseDir, "leaked.txt");
+
+      await resetDir(baseDir);
+      await fs.mkdir(rootDir, { recursive: true });
+      await fs.mkdir(outsideDir, { recursive: true });
+      await fs.writeFile(
+        path.join(outsideDir, "secret.txt"),
+        "top-secret-outside",
+        "utf8",
+      );
+
+      const link = await createDirectoryEscapeLink(linkDir, outsideDir);
+
+      if (!link.created) {
+        runner.assert(
+          true,
+          `当前环境无法创建 symlink/junction，跳过该用例 → ${link.reason}`,
+        );
+        await fs.rm(baseDir, { recursive: true, force: true });
+        return;
+      }
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-fs-symlink",
+        endpoints: { router: EP_FS_SYMLINK },
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-fs-symlink",
+        endpoints: { router: EP_FS_SYMLINK },
+      });
+
+      slave.fs.setRoot(rootDir);
+
+      try {
+        await master.start();
+        await slave.start();
+        await delay(250);
+
+        const registered = await waitForSlave(master, "s-fs-symlink", 3000);
+        runner.assert(
+          registered,
+          `symlink 测试 slave 已注册 → ${master.slaves}`,
+        );
+
+        const checks = await Promise.all([
+          expectRejected(
+            () =>
+              master.fs.stat("s-fs-symlink", "escape-dir/secret.txt", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["symlink", "符号链接", "越权", "非法"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.get("s-fs-symlink", "escape-dir/secret.txt", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["symlink", "符号链接", "越权", "非法"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.download(
+                "s-fs-symlink",
+                "escape-dir/secret.txt",
+                downloadTarget,
+                {
+                  timeoutMs: scaleMs(2500),
+                  chunkSize: 64 * 1024,
+                },
+              ),
+            ["symlink", "符号链接", "越权", "非法"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.list("s-fs-symlink", "escape-dir", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["symlink", "符号链接", "越权", "非法"],
+          ),
+        ]);
+
+        runner.assert(
+          checks.every((item) => item.matched),
+          `symlink 越界访问全部被拒绝 → ${checks.map((item) => item.message).join(" | ")}`,
+        );
+
+        runner.assert(
+          !(await pathExists(downloadTarget)),
+          "被拒绝后不应生成下载目标文件",
+        );
+      } finally {
+        await safeStop(slave, master);
+        await fs.rm(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  await runner.test(
+    "plain 模式：setRoot 策略 readOnly=true 应拒绝写操作",
+    async () => {
+      const EP_FS_POLICY_RO = "tcp://127.0.0.1:16047";
+      const baseDir = path.resolve("test/tmp/fs-policy-readonly");
+      const rootDir = path.join(baseDir, "remote");
+      const uploadSource = path.join(baseDir, "upload-source.txt");
+
+      await resetDir(baseDir);
+      await fs.mkdir(rootDir, { recursive: true });
+      await fs.writeFile(path.join(rootDir, "readonly.txt"), "hello\n", "utf8");
+      await fs.writeFile(uploadSource, "upload-body", "utf8");
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-fs-policy-ro",
+        endpoints: { router: EP_FS_POLICY_RO },
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-fs-policy-ro",
+        endpoints: { router: EP_FS_POLICY_RO },
+      });
+
+      slave.fs.setRoot(rootDir, {
+        readOnly: true,
+      });
+
+      try {
+        await master.start();
+        await slave.start();
+        await delay(250);
+
+        const registered = await waitForSlave(master, "s-fs-policy-ro", 3000);
+        runner.assert(
+          registered,
+          `readOnly 测试 slave 已注册 → ${master.slaves}`,
+        );
+
+        const statResult = await master.fs.stat(
+          "s-fs-policy-ro",
+          "readonly.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(statResult.isFile === true, "readOnly 下 stat 仍允许");
+
+        const getResult = await master.fs.get(
+          "s-fs-policy-ro",
+          "readonly.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(getResult) === "hello\n",
+          `readOnly 下 get 仍允许 → "${readFsBodyText(getResult)}"`,
+        );
+
+        const patch = createTwoFilesPatch(
+          "readonly.txt",
+          "readonly.txt",
+          "hello\n",
+          "changed\n",
+        );
+
+        const results = await Promise.all([
+          expectRejected(
+            () =>
+              master.fs.patch("s-fs-policy-ro", "readonly.txt", patch, {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["只读", "readOnly", "禁止", "不允许"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.rename(
+                "s-fs-policy-ro",
+                "readonly.txt",
+                "renamed.txt",
+                {
+                  timeoutMs: scaleMs(2000),
+                },
+              ),
+            ["只读", "readOnly", "禁止", "不允许"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.delete("s-fs-policy-ro", "readonly.txt", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["只读", "readOnly", "禁止", "不允许"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.upload("s-fs-policy-ro", uploadSource, "uploaded.txt", {
+                timeoutMs: scaleMs(2500),
+                chunkSize: 64 * 1024,
+              }),
+            ["只读", "readOnly", "禁止", "不允许"],
+          ),
+        ]);
+
+        runner.assert(
+          results.every((item) => item.matched),
+          `readOnly 写操作全部被拒绝 → ${results.map((item) => item.message).join(" | ")}`,
+        );
+
+        const finalContent = await master.fs.get(
+          "s-fs-policy-ro",
+          "readonly.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(finalContent) === "hello\n",
+          `readOnly 不应改动原文件 → "${readFsBodyText(finalContent)}"`,
+        );
+      } finally {
+        await safeStop(slave, master);
+        await fs.rm(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  await runner.test(
+    "plain 模式：setRoot 路径策略应限制 allowedPaths / denyGlobs / allow*",
+    async () => {
+      const EP_FS_POLICY = "tcp://127.0.0.1:16048";
+      const baseDir = path.resolve("test/tmp/fs-policy-paths");
+      const rootDir = path.join(baseDir, "remote");
+      const uploadSource = path.join(baseDir, "upload-source.txt");
+      const downloadTarget = path.join(baseDir, "downloaded.txt");
+
+      await resetDir(baseDir);
+      await fs.mkdir(path.join(rootDir, "public"), { recursive: true });
+      await fs.mkdir(path.join(rootDir, "private"), { recursive: true });
+
+      await fs.writeFile(
+        path.join(rootDir, "public", "allowed.txt"),
+        "allowed",
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(rootDir, "public", "blocked.secret.txt"),
+        "secret",
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(rootDir, "private", "hidden.txt"),
+        "hidden",
+        "utf8",
+      );
+      await fs.writeFile(uploadSource, "upload-policy-body", "utf8");
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-fs-policy",
+        endpoints: { router: EP_FS_POLICY },
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-fs-policy",
+        endpoints: { router: EP_FS_POLICY },
+      });
+
+      slave.fs.setRoot(rootDir, {
+        allowDelete: false,
+        allowPatch: false,
+        allowUpload: false,
+        allowedPaths: ["public/**"],
+        denyGlobs: ["**/*.secret.txt", "private/**"],
+      });
+
+      try {
+        await master.start();
+        await slave.start();
+        await delay(250);
+
+        const registered = await waitForSlave(master, "s-fs-policy", 3000);
+        runner.assert(
+          registered,
+          `policy 测试 slave 已注册 → ${master.slaves}`,
+        );
+
+        const allowedList = await master.fs.list("s-fs-policy", "public", {
+          timeoutMs: scaleMs(2000),
+        });
+        runner.assert(
+          Array.isArray(allowedList.entries) &&
+            allowedList.entries.some((entry) => entry.name === "allowed.txt"),
+          `allowedPaths 命中时 list 允许 → ${JSON.stringify(allowedList.entries)}`,
+        );
+
+        const allowedGet = await master.fs.get(
+          "s-fs-policy",
+          "public/allowed.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(allowedGet) === "allowed",
+          `allowedPaths 命中时 get 允许 → "${readFsBodyText(allowedGet)}"`,
+        );
+
+        const blockedChecks = await Promise.all([
+          expectRejected(
+            () =>
+              master.fs.get("s-fs-policy", "private/hidden.txt", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["拒绝", "禁止", "allow", "allowedPaths", "权限"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.get("s-fs-policy", "public/blocked.secret.txt", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["拒绝", "禁止", "deny", "denyGlobs", "权限"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.download(
+                "s-fs-policy",
+                "private/hidden.txt",
+                downloadTarget,
+                {
+                  timeoutMs: scaleMs(2500),
+                  chunkSize: 64 * 1024,
+                },
+              ),
+            ["拒绝", "禁止", "allow", "allowedPaths", "权限"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.delete("s-fs-policy", "public/allowed.txt", {
+                timeoutMs: scaleMs(2000),
+              }),
+            ["拒绝", "禁止", "delete", "allowDelete", "权限"],
+          ),
+          expectRejected(() => {
+            const patch = createTwoFilesPatch(
+              "allowed.txt",
+              "allowed.txt",
+              "allowed",
+              "changed",
+            );
+            return master.fs.patch("s-fs-policy", "public/allowed.txt", patch, {
+              timeoutMs: scaleMs(2000),
+            });
+          }, ["拒绝", "禁止", "patch", "allowPatch", "权限"]),
+          expectRejected(
+            () =>
+              master.fs.upload(
+                "s-fs-policy",
+                uploadSource,
+                "public/uploaded.txt",
+                {
+                  timeoutMs: scaleMs(2500),
+                  chunkSize: 64 * 1024,
+                },
+              ),
+            ["拒绝", "禁止", "upload", "allowUpload", "权限"],
+          ),
+        ]);
+
+        runner.assert(
+          blockedChecks.every((item) => item.matched),
+          `路径与操作策略全部生效 → ${blockedChecks.map((item) => item.message).join(" | ")}`,
+        );
+
+        const stillExists = await master.fs.get(
+          "s-fs-policy",
+          "public/allowed.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(stillExists) === "allowed",
+          `allowDelete=false 后文件仍存在 → "${readFsBodyText(stillExists)}"`,
+        );
+
+        runner.assert(
+          !(await pathExists(downloadTarget)),
+          "被拒绝的下载不应生成本地目标文件",
+        );
+      } finally {
+        await safeStop(slave, master);
+        await fs.rm(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   await runner.test(
     "encrypted 模式：fs get + upload/download 正常",
@@ -519,11 +958,7 @@ export async function runFsServiceTests(runner) {
 
       await resetDir(baseDir);
       await fs.mkdir(rootDir, { recursive: true });
-      await fs.writeFile(
-        path.join(rootDir, "secure-alpha.txt"),
-        "secure-alpha",
-        "utf8",
-      );
+      await fs.writeFile(path.join(rootDir, "alpha.txt"), "alpha-body", "utf8");
       await fs.writeFile(uploadSource, "secure-upload-mixed", "utf8");
 
       const master = new ZNL({
@@ -546,8 +981,8 @@ export async function runFsServiceTests(runner) {
       const publishLog = [];
       const pushLog = [];
 
-      master.ROUTER(async ({ payload }) => `EMIX-M:${toText(payload)}`);
-      slave.DEALER(async ({ payload }) => `EMIX-S:${toText(payload)}`);
+      master.ROUTER(async ({ payload }) => `MIXED-ENC-M:${toText(payload)}`);
+      slave.DEALER(async ({ payload }) => `MIXED-ENC-S:${toText(payload)}`);
       slave.SUBSCRIBE("enc-mixed-news", ({ payload }) =>
         publishLog.push(toText(payload)),
       );
@@ -569,25 +1004,25 @@ export async function runFsServiceTests(runner) {
         );
 
         const slaveRpcTasks = Array.from({ length: 8 }, (_, i) =>
-          slave.DEALER(`enc-s2m-${i}`, { timeoutMs: scaleMs(3500) }),
+          slave.DEALER(`enc-s2m-${i}`, { timeoutMs: scaleMs(3000) }),
         );
         const masterRpcTasks = Array.from({ length: 8 }, (_, i) =>
           master.ROUTER("s-fs-mixed-enc", `enc-m2s-${i}`, {
-            timeoutMs: scaleMs(3500),
+            timeoutMs: scaleMs(3000),
           }),
         );
         const fsGetTasks = Array.from({ length: 6 }, () =>
-          master.fs.get("s-fs-mixed-enc", "secure-alpha.txt", {
-            timeoutMs: scaleMs(3000),
+          master.fs.get("s-fs-mixed-enc", "alpha.txt", {
+            timeoutMs: scaleMs(2500),
           }),
         );
 
         const uploadPromise = master.fs.upload(
           "s-fs-mixed-enc",
           uploadSource,
-          "secure-uploaded-mixed.txt",
+          "uploaded-mixed-enc.txt",
           {
-            timeoutMs: scaleMs(4000),
+            timeoutMs: scaleMs(3500),
             chunkSize: 128 * 1024,
           },
         );
@@ -609,21 +1044,21 @@ export async function runFsServiceTests(runner) {
 
         runner.assert(
           slaveRpcResults.every(
-            (value, i) => toText(value) === `EMIX-M:enc-s2m-${i}`,
+            (value, i) => toText(value) === `MIXED-ENC-M:enc-s2m-${i}`,
           ),
           `encrypted slave→master 并发 RPC 全部正确 → ${slaveRpcResults.length} 条`,
         );
 
         runner.assert(
           masterRpcResults.every(
-            (value, i) => toText(value) === `EMIX-S:enc-m2s-${i}`,
+            (value, i) => toText(value) === `MIXED-ENC-S:enc-m2s-${i}`,
           ),
           `encrypted master→slave 并发 RPC 全部正确 → ${masterRpcResults.length} 条`,
         );
 
         runner.assert(
           fsGetResults.every(
-            (result) => readFsBodyText(result) === "secure-alpha",
+            (result) => readFsBodyText(result) === "alpha-body",
           ),
           `encrypted 并发 fs.get 全部正确 → ${fsGetResults.length} 次`,
         );
@@ -635,9 +1070,9 @@ export async function runFsServiceTests(runner) {
 
         const uploaded = await master.fs.get(
           "s-fs-mixed-enc",
-          "secure-uploaded-mixed.txt",
+          "uploaded-mixed-enc.txt",
           {
-            timeoutMs: scaleMs(3000),
+            timeoutMs: scaleMs(2500),
           },
         );
         runner.assert(

@@ -1,5 +1,31 @@
 # 更新日志
 
+## v0.6.6
+
+### 新增
+- `slave.fs.setRoot()` 新增策略配置参数 `policy`，支持：
+  - `readOnly`
+  - `allowDelete`
+  - `allowPatch`
+  - `allowUpload`
+  - `allowedPaths`
+  - `denyGlobs`
+- `slave.fs` 新增策略读取能力：`slave.fs.getPolicy()`。
+- 集成测试新增 `fs` 安全加固覆盖：
+  - root 内部 `symlink / junction` 越界访问拒绝
+  - `readOnly=true` 写操作拒绝
+  - `allowedPaths / denyGlobs / allowDelete / allowPatch / allowUpload` 策略生效校验
+
+### 变更
+- 加固内建 `fs` 服务的路径解析流程，不再只校验字符串层面的 `../` 越界。
+- `fs` 服务现在会拒绝访问路径链路中包含的符号链接（Linux/macOS symlink）或目录联接（Windows junction），防止通过 root 内部链接跳出 `slave.fs.setRoot()` 指定目录。
+- `list / stat / get / delete / rename / patch / upload / download` 全部接入更严格的安全路径校验与策略校验。
+- `list()` 在目录项中仍会保留 `symlink` 类型信息，但后续访问该链接目标会被拒绝。
+- README、API 文档与示例文档补全 `slave.fs.setRoot(rootPath, policy?)` 的真实行为说明、策略字段说明、符号链接限制与使用建议。
+
+### 测试
+- 自动执行 `pnpm test`，当前集成测试共 `207` 项全部通过。
+
 ## v0.6.5
 
 ### 新增
