@@ -573,7 +573,7 @@ ZNL 内建了独立的文件服务通道：
 - 走内部 `service` 通道
 - 不占用业务 `req / res`
 - 在 `encrypted=true` 下也能工作
-- 支持 `CRUD + upload/download`
+- 支持 `create + CRUD + upload/download`
 
 ---
 
@@ -627,13 +627,13 @@ await slave.start();
 
 - `readOnly: true`
   - 进入只读模式
-  - 会拒绝 `patch / rename / delete / upload`
+  - 会拒绝 `create / patch / rename / delete / upload`
 - `allowDelete: false`
   - 禁止远端删除
 - `allowPatch: false`
   - 禁止远端 patch 文本文件
 - `allowUpload: false`
-  - 禁止远端上传
+  - 禁止远端创建空文件与上传
 - `allowedPaths: [...]`
   - 路径白名单
 - `denyGlobs: [...]`
@@ -737,6 +737,140 @@ console.log({
 - 下载前做文件检查
 - 判断路径是文件还是目录
 - 构建同步逻辑
+
+---
+
+## 18.1 创建远端空文件
+
+适合场景：
+
+- 先创建占位文件
+- 先建目录结构中的空配置文件
+- 与后续 `patch()` / `upload()` 配合使用
+
+### 18.1.1 创建一个新空文件
+
+```js
+const result = await master.fs.create(
+  "slave-001",
+  "configs/app.env",
+);
+
+console.log(result);
+```
+
+常见返回结构：
+
+```js
+{
+  ok: true,
+  op: "file/create",
+  path: "configs/app.env",
+  created: true,
+  overwritten: false,
+}
+```
+
+### 18.1.2 自动创建父目录
+
+```js
+await master.fs.create(
+  "slave-001",
+  "nested/configs/app.json",
+  {
+    recursive: true,
+  },
+);
+```
+
+### 18.1.3 覆盖已存在文件
+
+```js
+await master.fs.create(
+  "slave-001",
+  "logs/current.log",
+  {
+    overwrite: true,
+  },
+);
+```
+
+说明：
+
+- 默认会创建空文件
+- 默认 `recursive: true`
+- 默认 `overwrite: false`
+- 若目标已存在且未开启 `overwrite`，会直接抛错
+- `create()` 受 `readOnly` 与 `allowUpload` 策略限制
+
+---
+
+## 18.2 创建远端目录
+
+适合场景：
+
+- 预先创建目录结构
+- 为后续 `create()` / `upload()` 提前准备目标目录
+- 初始化多级配置目录或日志目录
+
+### 18.2.1 递归创建目录
+
+```js
+const result = await master.fs.mkdir(
+  "slave-001",
+  "logs/2025/03",
+  {
+    recursive: true,
+  },
+);
+
+console.log(result);
+```
+
+常见返回结构：
+
+```js
+{
+  ok: true,
+  op: "file/mkdir",
+  path: "logs/2025/03",
+  created: true,
+}
+```
+
+### 18.2.2 要求目录必须不存在
+
+```js
+await master.fs.mkdir(
+  "slave-001",
+  "runtime/cache",
+  {
+    recursive: true,
+    existOk: false,
+  },
+);
+```
+
+### 18.2.3 先建目录，再创建文件
+
+```js
+await master.fs.mkdir("slave-001", "configs/environments", {
+  recursive: true,
+});
+
+await master.fs.create(
+  "slave-001",
+  "configs/environments/prod.env",
+);
+```
+
+说明：
+
+- `mkdir()` 的目标是创建目录，不是文件
+- 默认建议使用 `recursive: true`
+- 若目录已存在，是否视为成功取决于 `existOk` 配置
+- `mkdir()` 同样受 `readOnly` 与 `allowUpload` 策略限制
+- 目录路径也必须位于 `slave.fs.setRoot()` 限制范围内
 
 ---
 

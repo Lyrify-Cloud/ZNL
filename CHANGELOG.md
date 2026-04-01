@@ -1,5 +1,32 @@
 # 更新日志
 
+## v0.6.7
+
+### 新增
+- 内建 `fs` 命名空间新增：
+  - `master.fs.create(slaveId, path, options?)`
+  - `master.fs.mkdir(slaveId, path, options?)`
+- `create()` 支持创建远端空文件：
+  - 支持 `recursive` 自动创建缺失父目录
+  - 支持 `overwrite` 控制是否覆盖已有文件
+- `mkdir()` 支持创建远端目录：
+  - 支持 `recursive` 自动创建多级目录
+  - 支持 `existOk` 控制目录已存在时是否视为成功
+- 集成测试新增 `fs.create()` / `fs.mkdir()` 覆盖：
+  - 正常创建文件与目录
+  - `readOnly=true` 下拒绝创建
+  - `allowUpload=false` 下拒绝创建
+
+### 变更
+- `fs` 策略说明扩展到 `create / mkdir`：
+  - `readOnly=true` 时会拒绝 `create / mkdir / patch / delete / rename / upload`
+  - `allowUpload=false` 时会拒绝 `create()`、`mkdir()` 与 `upload()`
+- `fs` 路径解析逻辑调整为支持创建场景下缺失的父目录链，同时仍保留 root 边界与符号链接防逃逸检查。
+- README、API 文档与示例文档同步补充 `create()` / `mkdir()` 的参数、返回值、策略约束与使用示例。
+
+### 测试
+- 自动执行 `node test/integration/run-module.js fs`，当前 `fs` 模块集成测试共 `57` 项全部通过。
+
 ## v0.6.6
 
 ### 新增

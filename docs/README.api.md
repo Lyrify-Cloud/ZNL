@@ -58,6 +58,8 @@
   - [`7.1 slave.fs.setRoot(rootPath)`](#71-slavefssetrootrootpath)
   - [`7.2 master.fs.list(slaveId, path, options?)`](#72-masterfslistslaveid-path-options)
   - [`7.3 master.fs.get(slaveId, path, options?)`](#73-masterfsgetslaveid-path-options)
+  - [`7.3.1 master.fs.create(slaveId, path, options?)`](#731-masterfscreateslaveid-path-options)
+  - [`7.3.2 master.fs.mkdir(slaveId, path, options?)`](#732-masterfsmkdirslaveid-path-options)
   - [`7.4 master.fs.patch(slaveId, path, unifiedDiff, options?)`](#74-masterfspatchslaveid-path-unifieddiff-options)
   - [`7.5 master.fs.delete(slaveId, path, options?)`](#75-masterfsdeleteslaveid-path-options)
   - [`7.6 master.fs.rename(slaveId, from, to, options?)`](#76-masterfsrenameslaveid-from-to-options)
@@ -816,6 +818,8 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 
 会拒绝所有写操作，包括：
 
+- `master.fs.create()`
+- `master.fs.mkdir()`
 - `master.fs.patch()`
 - `master.fs.delete()`
 - `master.fs.rename()`
@@ -842,6 +846,8 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 
 会拒绝：
 
+- `master.fs.create()`
+- `master.fs.mkdir()`
 - `master.fs.upload()`
 
 5. `allowedPaths`
@@ -1047,6 +1053,116 @@ slave.fs.setRoot("./storage", {
 - `result.body[0]`：完整文件内容
 
 失败时不会返回 `{ ok: false }` 给调用方，而是直接抛错。
+
+---
+
+### 7.3.1 `master.fs.create(slaveId, path, options?)`
+
+在远端创建空文件。
+
+#### 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slaveId` | `string` | 是 | 目标从节点 |
+| `path` | `string` | 是 | 远端文件路径 |
+| `options` | `object` | 否 | 附加参数 |
+| `options.overwrite` | `boolean` | 否 | 是否允许覆盖已存在的文件，默认 `false` |
+| `options.recursive` | `boolean` | 否 | 是否自动创建缺失父目录，默认 `true` |
+| `options.timeoutMs` | `number` | 否 | 请求超时 |
+
+#### 返回值
+
+`master.fs.create()` 成功时直接返回远端 `meta` 对象，真实结构为：
+
+- `{
+    ok: true,
+    op: "file/create",
+    path: string,
+    created: true,
+    overwritten: boolean
+  }`
+
+固定字段如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `true` | 成功时固定为 `true` |
+| `op` | `"file/create"` | 固定操作名 |
+| `path` | `string` | 目标路径 |
+| `created` | `true` | 当前实现成功时固定为 `true` |
+| `overwritten` | `boolean` | 是否覆盖了已有文件 |
+
+#### 行为说明
+
+- 当前会创建空文件
+- 默认 `recursive=true`，缺失的父目录会自动创建
+- 默认 `overwrite=false`，目标已存在时会直接抛错
+- 若目标已存在且是目录，会直接抛错
+- 受 `slave.fs.setRoot()` 根目录限制
+- 受 `readOnly`、`allowedPaths`、`denyGlobs` 影响
+- 当前实现中，`create()` 也受 `allowUpload` 限制
+
+#### 适用场景
+
+- 远端预创建占位文件
+- 先建空文件，再配合 `patch()` 写入文本内容
+- 管理端初始化目录结构中的空文件
+
+---
+
+### 7.3.2 `master.fs.mkdir(slaveId, path, options?)`
+
+在远端创建目录。
+
+#### 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slaveId` | `string` | 是 | 目标从节点 |
+| `path` | `string` | 是 | 远端目录路径 |
+| `options` | `object` | 否 | 附加参数 |
+| `options.recursive` | `boolean` | 否 | 是否自动创建缺失父目录，默认 `true` |
+| `options.existOk` | `boolean` | 否 | 目录已存在时是否视为成功，默认 `true` |
+| `options.timeoutMs` | `number` | 否 | 请求超时 |
+
+#### 返回值
+
+`master.fs.mkdir()` 成功时直接返回远端 `meta` 对象，真实结构为：
+
+- `{
+    ok: true,
+    op: "file/mkdir",
+    path: string,
+    created: true,
+    existed: boolean
+  }`
+
+固定字段如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | `true` | 成功时固定为 `true` |
+| `op` | `"file/mkdir"` | 固定操作名 |
+| `path` | `string` | 目标路径 |
+| `created` | `true` | 当前实现成功时固定为 `true` |
+| `existed` | `boolean` | 目标目录在本次调用前是否已存在 |
+
+#### 行为说明
+
+- 当前会创建目录，而不是文件
+- 默认 `recursive=true`，缺失的父目录会自动创建
+- 默认 `existOk=true`，目标目录已存在时视为成功
+- 若目标已存在且是文件，会直接抛错
+- 受 `slave.fs.setRoot()` 根目录限制
+- 受 `readOnly`、`allowedPaths`、`denyGlobs` 影响
+- 当前实现中，`mkdir()` 也受 `allowUpload` 限制
+
+#### 适用场景
+
+- 远端预创建目录结构
+- 上传前准备目标目录
+- 初始化配置、日志、缓存目录
 
 ---
 

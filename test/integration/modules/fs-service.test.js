@@ -123,6 +123,56 @@ export async function runFsServiceTests(runner) {
           `get 内容正确 → "${readFsBodyText(get1)}"`,
         );
 
+        const mkdirResult = await master.fs.mkdir("s-fs", "nested/subdir", {
+          timeoutMs: scaleMs(2000),
+          recursive: true,
+        });
+        runner.assert(
+          mkdirResult.ok === true && mkdirResult.created === true,
+          `mkdir 返回成功 → ${JSON.stringify(mkdirResult)}`,
+        );
+
+        const mkdirStat = await master.fs.stat("s-fs", "nested/subdir", {
+          timeoutMs: scaleMs(2000),
+        });
+        runner.assert(
+          mkdirStat.isDirectory === true,
+          "mkdir 后 stat 返回 isDirectory=true",
+        );
+
+        const createResult = await master.fs.create(
+          "s-fs",
+          "nested/new-file.txt",
+          {
+            timeoutMs: scaleMs(2000),
+            recursive: true,
+          },
+        );
+        runner.assert(
+          createResult.ok === true && createResult.created === true,
+          `create 返回成功 → ${JSON.stringify(createResult)}`,
+        );
+
+        const createdStat = await master.fs.stat(
+          "s-fs",
+          "nested/new-file.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          createdStat.isFile === true,
+          "create 后 stat 返回 isFile=true",
+        );
+
+        const createdGet = await master.fs.get("s-fs", "nested/new-file.txt", {
+          timeoutMs: scaleMs(2000),
+        });
+        runner.assert(
+          readFsBodyText(createdGet) === "",
+          `create 后空文件内容正确 → "${readFsBodyText(createdGet)}"`,
+        );
+
         const patch = createTwoFilesPatch(
           "hello.txt",
           "hello.txt",
@@ -499,6 +549,22 @@ export async function runFsServiceTests(runner) {
           ),
           expectRejected(
             () =>
+              master.fs.mkdir("s-fs-policy-ro", "created-dir", {
+                timeoutMs: scaleMs(2000),
+                recursive: true,
+              }),
+            ["只读", "readOnly", "禁止", "不允许"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.create("s-fs-policy-ro", "created.txt", {
+                timeoutMs: scaleMs(2000),
+                recursive: true,
+              }),
+            ["只读", "readOnly", "禁止", "不允许"],
+          ),
+          expectRejected(
+            () =>
               master.fs.upload("s-fs-policy-ro", uploadSource, "uploaded.txt", {
                 timeoutMs: scaleMs(2500),
                 chunkSize: 64 * 1024,
@@ -657,6 +723,22 @@ export async function runFsServiceTests(runner) {
               timeoutMs: scaleMs(2000),
             });
           }, ["拒绝", "禁止", "patch", "allowPatch", "权限"]),
+          expectRejected(
+            () =>
+              master.fs.mkdir("s-fs-policy", "public/created-dir", {
+                timeoutMs: scaleMs(2000),
+                recursive: true,
+              }),
+            ["拒绝", "禁止", "upload", "allowUpload", "权限"],
+          ),
+          expectRejected(
+            () =>
+              master.fs.create("s-fs-policy", "public/created.txt", {
+                timeoutMs: scaleMs(2000),
+                recursive: true,
+              }),
+            ["拒绝", "禁止", "upload", "allowUpload", "权限"],
+          ),
           expectRejected(
             () =>
               master.fs.upload(

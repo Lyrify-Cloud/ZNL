@@ -37,7 +37,7 @@
 - 心跳采用 `heartbeat -> heartbeat_ack` 应答机制
 - `Slave` 提供主节点在线状态查询 API：`masterOnline` / `isMasterOnline()`
 - 内建 `fs` 文件服务命名空间：
-  - `master.fs.list/get/patch/delete/rename/stat`
+  - `master.fs.list/get/create/mkdir/patch/delete/rename/stat`
   - `master.fs.upload/download`
   - `slave.fs.setRoot("./")`
 - `fs` 走独立 service 通道，不占用业务 `request/response`
@@ -235,7 +235,7 @@ await slave.start();
 
 - `readOnly: boolean`
   - 设为 `true` 时，拒绝所有写操作
-  - 当前会拦截：`patch / delete / rename / upload`
+  - 当前会拦截：`create / mkdir / patch / delete / rename / upload`
 - `allowDelete: boolean`
   - 是否允许 `master.fs.delete()`
   - 默认 `true`
@@ -244,6 +244,7 @@ await slave.start();
   - 默认 `true`
 - `allowUpload: boolean`
   - 是否允许 `master.fs.upload()`
+  - 也会限制 `master.fs.create()` 与 `master.fs.mkdir()`
   - 默认 `true`
 - `allowedPaths: string[]`
   - 可选白名单路径/模式
@@ -265,6 +266,8 @@ await slave.start();
 - `slave.fs.setRoot(rootPath, policy?)`
 - `master.fs.list(slaveId, path, options?)`
 - `master.fs.get(slaveId, path, options?)`
+- `master.fs.create(slaveId, path, options?)`
+- `master.fs.mkdir(slaveId, path, options?)`
 - `master.fs.patch(slaveId, path, unifiedDiff, options?)`
 - `master.fs.delete(slaveId, path, options?)`
 - `master.fs.rename(slaveId, from, to, options?)`

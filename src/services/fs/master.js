@@ -134,6 +134,44 @@ export function createMasterFsApi(master) {
       return parsed;
     },
 
+    async create(slaveId, targetPath, options = {}) {
+      const opts = normalizeOptions(options);
+      const parsed = await request(
+        master,
+        slaveId,
+        {
+          service: "fs",
+          op: OPS.CREATE,
+          path: String(targetPath ?? ""),
+          overwrite: Boolean(opts.overwrite),
+          recursive: opts.recursive !== false,
+        },
+        [],
+        opts,
+      );
+
+      return assertOk(parsed.meta, OPS.CREATE);
+    },
+
+    async mkdir(slaveId, targetPath, options = {}) {
+      const opts = normalizeOptions(options);
+      const parsed = await request(
+        master,
+        slaveId,
+        {
+          service: "fs",
+          op: OPS.MKDIR,
+          path: String(targetPath ?? ""),
+          recursive: opts.recursive !== false,
+          existOk: opts.existOk !== false,
+        },
+        [],
+        opts,
+      );
+
+      return assertOk(parsed.meta, OPS.MKDIR);
+    },
+
     async delete(slaveId, targetPath, options) {
       const parsed = await request(
         master,

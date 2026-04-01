@@ -5,6 +5,8 @@ export const FS_SERVICE_NAME = "fs";
 export const OPS = Object.freeze({
   LIST: "file/list",
   GET: "file/get",
+  CREATE: "file/create",
+  MKDIR: "file/mkdir",
   PATCH: "file/patch",
   INIT: "file/init",
   RESUME: "file/resume",

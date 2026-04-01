@@ -12,6 +12,8 @@ import {
 
 import { assertRoot, ensureDir, pathExists, statSafe } from "./utils.js";
 
+const FS_MKDIR_OP = "file/mkdir";
+
 function ensureSlave(instance) {
   if (!instance || instance.role !== "slave") {
     throw new Error("fs 命名空间只能挂载在 slave 实例上。");
@@ -290,7 +292,7 @@ async function resolveSafeParentPath(root, inputPath) {
   }
 
   const parent = path.dirname(target);
-  await ensureNoSymlinkInPath(root, parent, { allowMissingLeaf: false });
+  await ensureNoSymlinkInPath(root, parent, { allowMissingLeaf: true });
 
   return {
     relativePath: toPosixPath(path.relative(root, target) || "."),
@@ -323,7 +325,14 @@ function enforcePathPolicy(policy, relativePath, { op, write = false } = {}) {
     throw new Error("访问被策略拒绝：allowPatch=false。");
   }
 
-  if (write && (op === OPS.INIT || op === OPS.CHUNK || op === OPS.COMPLETE)) {
+  if (
+    write &&
+    (op === OPS.CREATE ||
+      op === FS_MKDIR_OP ||
+      op === OPS.INIT ||
+      op === OPS.CHUNK ||
+      op === OPS.COMPLETE)
+  ) {
     if (!policy.allowUpload) {
       throw new Error("访问被策略拒绝：allowUpload=false。");
     }
@@ -493,6 +502,104 @@ export function createSlaveFsApi(slave) {
         size: buffer.length,
       }),
       [buffer],
+    );
+  }
+
+  async function handleCreate(meta) {
+    const recursive = meta?.recursive !== false;
+    const overwrite = Boolean(meta?.overwrite);
+    const targetInfo = await resolveWritePath(meta.path, OPS.CREATE, {
+      allowMissingLeaf: true,
+    });
+
+    const existingStat = await lstatSafe(targetInfo.absolutePath);
+    if (existingStat?.isSymbolicLink()) {
+      throw new Error("拒绝创建或覆盖符号链接。");
+    }
+    if (existingStat?.isDirectory()) {
+      throw new Error("目标已存在且为目录。");
+    }
+    if (existingStat && !overwrite) {
+      throw new Error("目标文件已存在，请使用 overwrite=true 覆盖。");
+    }
+
+    const parentDir = path.dirname(targetInfo.absolutePath);
+    if (recursive) {
+      await ensureDir(parentDir);
+    } else {
+      const parentStat = await lstatSafe(parentDir);
+      if (!parentStat) {
+        throw new Error("父目录不存在。");
+      }
+      if (parentStat.isSymbolicLink()) {
+        throw new Error("拒绝通过符号链接父目录创建文件。");
+      }
+      if (!parentStat.isDirectory()) {
+        throw new Error("父路径不是目录。");
+      }
+    }
+
+    await fs.writeFile(targetInfo.absolutePath, Buffer.alloc(0));
+
+    return buildRpcPayload(
+      okMeta(OPS.CREATE, {
+        path: String(meta.path ?? ""),
+        created: true,
+        overwritten: Boolean(existingStat),
+      }),
+    );
+  }
+
+  async function handleMkdir(meta) {
+    const recursive = meta?.recursive !== false;
+    const existOk = meta?.existOk !== false;
+    const targetInfo = await resolveWritePath(meta.path, FS_MKDIR_OP, {
+      allowMissingLeaf: true,
+    });
+
+    const existingStat = await lstatSafe(targetInfo.absolutePath);
+    if (existingStat?.isSymbolicLink()) {
+      throw new Error("拒绝创建或复用符号链接目录。");
+    }
+    if (existingStat) {
+      if (!existingStat.isDirectory()) {
+        throw new Error("目标已存在且不是目录。");
+      }
+      if (!existOk) {
+        throw new Error("目标目录已存在，请使用 existOk=true 允许复用。");
+      }
+
+      return buildRpcPayload(
+        okMeta(FS_MKDIR_OP, {
+          path: String(meta.path ?? ""),
+          created: true,
+          existed: true,
+        }),
+      );
+    }
+
+    const parentDir = path.dirname(targetInfo.absolutePath);
+    if (!recursive) {
+      const parentStat = await lstatSafe(parentDir);
+      if (!parentStat) {
+        throw new Error("父目录不存在。");
+      }
+      if (parentStat.isSymbolicLink()) {
+        throw new Error("拒绝通过符号链接父目录创建目录。");
+      }
+      if (!parentStat.isDirectory()) {
+        throw new Error("父路径不是目录。");
+      }
+    }
+
+    await fs.mkdir(targetInfo.absolutePath, { recursive });
+
+    return buildRpcPayload(
+      okMeta(FS_MKDIR_OP, {
+        path: String(meta.path ?? ""),
+        created: true,
+        existed: false,
+      }),
     );
   }
 
@@ -857,6 +964,10 @@ export function createSlaveFsApi(slave) {
         return await handleStat(meta);
       case OPS.GET:
         return await handleGet(meta);
+      case OPS.CREATE:
+        return await handleCreate(meta);
+      case FS_MKDIR_OP:
+        return await handleMkdir(meta);
       case OPS.DELETE:
         return await handleDelete(meta);
       case OPS.RENAME:
