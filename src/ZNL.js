@@ -55,6 +55,8 @@ import {
   buildResponseFrames,
   buildPublishFrames,
   buildPushFrames,
+  buildServiceRequestFrames,
+  buildServiceResponseFrames,
   parseControlFrames,
 } from "./protocol.js";
 
@@ -74,6 +76,9 @@ import {
 
 import { PendingManager } from "./PendingManager.js";
 import { SendQueue } from "./SendQueue.js";
+import { ServiceManager } from "./services/ServiceManager.js";
+import { createMasterFsApi } from "./services/fs/master.js";
+import { createSlaveFsApi } from "./services/fs/slave.js";
 
 export class ZNL extends EventEmitter {
   // ─── 节点配置（构造后只读）────────────────────────────────────────────────
@@ -117,6 +122,12 @@ export class ZNL extends EventEmitter {
 
   /** @type {SendQueue} 串行发送队列（防止 socket 并发写入） */
   #sendQueue;
+
+  /** @type {ServiceManager} 内建服务通道管理器（独立于业务 RPC） */
+  #serviceManager;
+
+  /** @type {ReturnType<typeof createMasterFsApi>|ReturnType<typeof createSlaveFsApi>|null} 懒加载 fs 命名空间 */
+  #fsApi = null;
 
   /** @type {Function|null} master 侧收到 slave 请求时的自动回复处理器 */
   #routerAutoHandler = null;
@@ -279,6 +290,10 @@ export class ZNL extends EventEmitter {
 
     this.#pending = new PendingManager(maxPending);
     this.#sendQueue = new SendQueue();
+    this.#serviceManager = new ServiceManager({
+      owner: this,
+      maxPending,
+    });
     this.#heartbeatInterval =
       this.#normalizeHeartbeatInterval(heartbeatInterval);
 
@@ -593,6 +608,199 @@ export class ZNL extends EventEmitter {
     return this;
   }
 
+  /**
+   * 内建文件服务命名空间
+   * - master：返回 `master.fs.*`
+   * - slave ：返回 `slave.fs.setRoot(...)`
+   */
+  get fs() {
+    if (this.#fsApi) return this.#fsApi;
+    this.#fsApi =
+      this.role === "master" ? createMasterFsApi(this) : createSlaveFsApi(this);
+    return this.#fsApi;
+  }
+
+  /**
+   * 注册内建 service handler（当前主要用于 slave 侧文件服务）
+   * @param {string} service
+   * @param {Function} handler
+   * @returns {this}
+   */
+  registerService(service, handler) {
+    if (typeof handler !== "function") {
+      throw new TypeError("service handler 必须是函数。");
+    }
+
+    this.#serviceManager.register(service, (event) =>
+      handler(event.payload, event),
+    );
+    return this;
+  }
+
+  /**
+   * 注销内建 service handler
+   * @param {string} service
+   * @returns {this}
+   */
+  unregisterService(service) {
+    this.#serviceManager.unregister(service);
+    return this;
+  }
+
+  /**
+   * master 侧通过独立 service 通道向指定 slave 发请求
+   * @param {string|Buffer|Uint8Array} identity
+   * @param {string} service
+   * @param {Array<string|Buffer>} payloadFrames
+   * @param {{ timeoutMs?: number }} [options]
+   * @returns {Promise<Buffer|Array>}
+   */
+  async _serviceRequest(service, identity, payloadFrames, options = {}) {
+    const response = await this.#serviceManager.requestTo(
+      identity,
+      service,
+      payloadFrames,
+      options,
+    );
+    return response.payload;
+  }
+
+  /**
+   * 供内部 service 管理器复用现有 socket 获取逻辑
+   * @param {string} name
+   * @param {string} displayName
+   * @returns {import("zeromq").Socket}
+   */
+  _serviceRequireSocket(name, displayName) {
+    return this.#requireSocket(name, displayName);
+  }
+
+  /**
+   * 供内部 service 管理器复用现有串行发送队列
+   * @param {string} channel
+   * @param {() => Promise<void>} task
+   * @returns {Promise<void>}
+   */
+  _serviceEnqueueSend(channel, task) {
+    return this.#sendQueue.enqueue(channel, task);
+  }
+
+  /**
+   * 规范化内部 service 成功响应 payload
+   * @param {*} payload
+   * @returns {Array<string|Buffer>}
+   */
+  _serviceNormalizeReplyPayload(payload) {
+    return normalizeFrames(payload);
+  }
+
+  /**
+   * 构造内部 service 请求帧（复用现有签名/加密链路）
+   * @param {string} requestId
+   * @param {string} service
+   * @param {Array<string|Buffer>} payload
+   * @param {string} [identityText]
+   * @returns {Array<string|Buffer>}
+   */
+  _serviceCreateRequestFrames(requestId, service, payload, identityText = "") {
+    const keys = this.#secureEnabled
+      ? this.#resolveSlaveKeys(identityText)
+      : null;
+
+    if (this.#secureEnabled && !keys) {
+      throw new Error(`未配置该 slave 的 authKey：${identityText}`);
+    }
+
+    const securityRequestId = `svc:${String(service)}:${String(requestId)}`;
+    const payloadFrames = this.#sealPayloadFrames(
+      "request",
+      securityRequestId,
+      payload,
+      keys?.encryptKey ?? null,
+    );
+    const authProof = this.#secureEnabled
+      ? this.#createAuthProof(
+          "request",
+          securityRequestId,
+          payloadFrames,
+          keys?.signKey ?? null,
+        )
+      : "";
+
+    return buildServiceRequestFrames(
+      requestId,
+      service,
+      payloadFrames,
+      authProof,
+    );
+  }
+
+  /**
+   * 构造内部 service 响应帧（复用现有签名/加密链路）
+   * @param {string} requestId
+   * @param {string} service
+   * @param {Array<string|Buffer>} payload
+   * @param {string|null} [identityText]
+   * @returns {Array<string|Buffer>}
+   */
+  _serviceCreateResponseFrames(
+    requestId,
+    service,
+    payload,
+    identityText = null,
+  ) {
+    const securityRequestId = `svc:${String(service)}:${String(requestId)}`;
+
+    let keys = null;
+    if (this.#secureEnabled && this.role === "master") {
+      keys = this.#resolveSlaveKeys(identityText ?? "");
+      if (!keys) {
+        throw new Error(`未配置该 slave 的 authKey：${identityText ?? ""}`);
+      }
+    }
+
+    const payloadFrames = this.#sealPayloadFrames(
+      "response",
+      securityRequestId,
+      payload,
+      keys?.encryptKey ?? null,
+    );
+    const authProof = this.#secureEnabled
+      ? this.#createAuthProof(
+          "response",
+          securityRequestId,
+          payloadFrames,
+          keys?.signKey ?? null,
+        )
+      : "";
+
+    return buildServiceResponseFrames(
+      requestId,
+      service,
+      payloadFrames,
+      authProof,
+    );
+  }
+
+  /**
+   * 构造内部 service 错误响应 payload（单帧 JSON）
+   * @param {string} service
+   * @param {unknown} error
+   * @returns {Array<Buffer>}
+   */
+  _serviceBuildErrorPayload(service, error) {
+    return [
+      Buffer.from(
+        JSON.stringify({
+          service: String(service ?? ""),
+          ok: false,
+          error: error?.message ? String(error.message) : String(error),
+        }),
+        "utf8",
+      ),
+    ];
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   //  生命周期内部实现
   // ═══════════════════════════════════════════════════════════════════════════
@@ -635,7 +843,9 @@ export class ZNL extends EventEmitter {
     }
 
     this.running = false;
-    this.#pending.rejectAll(new Error("节点已停止，所有待处理请求已取消。"));
+    const stopError = new Error("节点已停止，所有待处理请求已取消。");
+    this.#pending.rejectAll(stopError);
+    this.#serviceManager.rejectAll(stopError);
     await this.#teardown();
   }
 
@@ -962,6 +1172,82 @@ export class ZNL extends EventEmitter {
       return;
     }
 
+    // ── 内建服务响应：slave -> master ──────────────────────────────────────
+    if (parsed.kind === "service_response") {
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const keys = this.#resolveSlaveKeys(identityText);
+        if (!keys) {
+          this.#emitAuthFailed(event, "未配置该 slave 的 authKey。");
+          if (this.#slaves.delete(identityText)) {
+            this.emit("slave_disconnected", identityText);
+          }
+          return;
+        }
+
+        const securityRequestId = `svc:${String(parsed.service)}:${String(parsed.requestId)}`;
+        const v = this.#verifyIncomingProof({
+          kind: "response",
+          proofToken: parsed.authProof,
+          requestId: securityRequestId,
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: identityText,
+          signKey: keys.signKey,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        this.#ensureSlaveOnline(identityText, identity, {
+          touch: true,
+          signKey: keys.signKey,
+          encryptKey: keys.encryptKey,
+        });
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "response",
+              securityRequestId,
+              parsed.payloadFrames,
+              identityText,
+              keys.encryptKey,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `服务响应 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      } else {
+        this.#ensureSlaveOnline(identityText, identity, { touch: true });
+      }
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const serviceEvent = {
+        ...event,
+        service: parsed.service,
+        payload: finalPayload,
+        payloadFrames: finalFrames,
+      };
+
+      this.#serviceManager.handleIncomingResponse({
+        requestId: parsed.requestId,
+        service: parsed.service,
+        identityText,
+        payload: finalPayload,
+        payloadFrames: finalFrames,
+        rawEvent: serviceEvent,
+      });
+
+      this.emit("service_response", serviceEvent);
+      return;
+    }
+
     // ── RPC 响应：slave -> master ──────────────────────────────────────────
     if (parsed.kind === "response") {
       let finalFrames = parsed.payloadFrames;
@@ -1111,6 +1397,67 @@ export class ZNL extends EventEmitter {
           this.emit("error", error);
         }
       }
+      return;
+    }
+
+    // ── 内建服务请求：master -> slave ──────────────────────────────────────
+    if (parsed.kind === "service_request") {
+      let finalFrames = parsed.payloadFrames;
+
+      if (this.#secureEnabled) {
+        const securityRequestId = `svc:${String(parsed.service)}:${String(parsed.requestId)}`;
+        const v = this.#verifyIncomingProof({
+          kind: "request",
+          proofToken: parsed.authProof,
+          requestId: securityRequestId,
+          payloadFrames: parsed.payloadFrames,
+          expectedNodeId: this.#masterNodeId,
+        });
+        if (!v.ok) {
+          this.#emitAuthFailed(event, v.error);
+          return;
+        }
+
+        if (!this.#masterNodeId) this.#masterNodeId = v.envelope.nodeId;
+
+        if (this.encrypted) {
+          try {
+            finalFrames = this.#openPayloadFrames(
+              "request",
+              securityRequestId,
+              parsed.payloadFrames,
+              this.#masterNodeId,
+            );
+          } catch (error) {
+            this.#emitAuthFailed(
+              event,
+              `服务请求 payload 解密失败：${error?.message ?? error}`,
+            );
+            return;
+          }
+        }
+      }
+
+      this.#confirmMasterReachable({ scheduleNextHeartbeat: true });
+
+      const finalPayload = payloadFromFrames(finalFrames);
+      const serviceEvent = {
+        ...event,
+        service: parsed.service,
+        payload: finalPayload,
+        payloadFrames: finalFrames,
+      };
+
+      this.emit("service_request", serviceEvent);
+
+      await this.#serviceManager.handleIncomingRequest({
+        channel: "dealer",
+        service: parsed.service,
+        requestId: parsed.requestId,
+        payload: finalPayload,
+        payloadFrames: finalFrames,
+        rawEvent: serviceEvent,
+      });
       return;
     }
 
@@ -1385,7 +1732,7 @@ export class ZNL extends EventEmitter {
       routingId: this.id,
       immediate: true,
       linger: 0,
-      sendTimeout: 0,
+      // sendTimeout: 0,
       reconnectInterval: 200,
       reconnectMaxInterval: 1000,
     });

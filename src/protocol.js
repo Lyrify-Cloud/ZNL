@@ -26,6 +26,8 @@ import {
   CONTROL_PUSH,
   CONTROL_HEARTBEAT,
   CONTROL_HEARTBEAT_ACK,
+  CONTROL_SVC_REQ,
+  CONTROL_SVC_RES,
   EMPTY_BUFFER,
 } from "./constants.js";
 
@@ -217,6 +219,63 @@ export function buildHeartbeatAckFrames(authProof = "") {
   return frames;
 }
 
+/**
+ * 构建内部服务请求控制帧数组
+ * 帧结构：[PREFIX, "svc_req", requestId, service, (AUTH_MARKER, authProof)?, ...payloadFrames]
+ *
+ * 说明：
+ * - 用于 ZNL 内建服务通道（如 fs），与普通业务 RPC 分流
+ * - payloadFrames 建议使用多帧格式：
+ *   第 1 帧为 JSON meta，第 2+ 帧为可选二进制 body
+ *
+ * @param {string} requestId
+ * @param {string} service
+ * @param {Array<string|Buffer>} payloadFrames
+ * @param {string} [authProof] - 可选认证证明
+ * @returns {Array}
+ */
+export function buildServiceRequestFrames(
+  requestId,
+  service,
+  payloadFrames,
+  authProof = "",
+) {
+  const header = [
+    CONTROL_PREFIX,
+    CONTROL_SVC_REQ,
+    String(requestId),
+    String(service),
+  ];
+  if (authProof) header.push(CONTROL_AUTH, authProof);
+  return [...header, ...payloadFrames];
+}
+
+/**
+ * 构建内部服务响应控制帧数组
+ * 帧结构：[PREFIX, "svc_res", requestId, service, (AUTH_MARKER, authProof)?, ...payloadFrames]
+ *
+ * @param {string} requestId
+ * @param {string} service
+ * @param {Array<string|Buffer>} payloadFrames
+ * @param {string} [authProof] - 可选认证证明
+ * @returns {Array}
+ */
+export function buildServiceResponseFrames(
+  requestId,
+  service,
+  payloadFrames,
+  authProof = "",
+) {
+  const header = [
+    CONTROL_PREFIX,
+    CONTROL_SVC_RES,
+    String(requestId),
+    String(service),
+  ];
+  if (authProof) header.push(CONTROL_AUTH, authProof);
+  return [...header, ...payloadFrames];
+}
+
 // ─── 帧解析 ───────────────────────────────────────────────────────────────────
 
 /**
@@ -231,15 +290,18 @@ export function buildHeartbeatAckFrames(authProof = "") {
  * - "push"          → slave 单向推送消息（携带 topic）
  * - "request"       → 对端主动发起的 RPC 请求
  * - "response"      → 对端返回的 RPC 响应（匹配 pending 请求）
+ * - "service_request"  → 对端主动发起的内部服务请求
+ * - "service_response" → 对端返回的内部服务响应
  * - "message"       → 非控制帧，普通消息透传
  *
  * @param {Array} frames - 不含 identity 帧的帧数组
  * @returns {{
- *   kind         : "register"|"unregister"|"heartbeat"|"heartbeat_ack"|"publish"|"push"|"request"|"response"|"message",
+ *   kind         : "register"|"unregister"|"heartbeat"|"heartbeat_ack"|"publish"|"push"|"request"|"response"|"service_request"|"service_response"|"message",
  *   requestId    : string|null,
  *   authKey      : string|null,
  *   authProof    : string|null,
  *   topic        : string|null,
+ *   service      : string|null,
  *   payloadFrames: Array
  * }}
  */
@@ -252,6 +314,7 @@ export function parseControlFrames(frames) {
       authKey: null,
       authProof: null,
       topic: null,
+      service: null,
       payloadFrames: frames,
     };
   }
@@ -270,6 +333,7 @@ export function parseControlFrames(frames) {
       authKey,
       authProof: null,
       topic: null,
+      service: null,
       payloadFrames: [],
     };
   }
@@ -282,6 +346,7 @@ export function parseControlFrames(frames) {
       authKey: null,
       authProof: null,
       topic: null,
+      service: null,
       payloadFrames: [],
     };
   }
@@ -299,6 +364,7 @@ export function parseControlFrames(frames) {
       authKey: null,
       authProof,
       topic: null,
+      service: null,
       payloadFrames: [],
     };
   }
@@ -316,6 +382,7 @@ export function parseControlFrames(frames) {
       authKey: null,
       authProof,
       topic: null,
+      service: null,
       payloadFrames: [],
     };
   }
@@ -338,6 +405,7 @@ export function parseControlFrames(frames) {
       authKey: null,
       authProof,
       topic,
+      service: null,
       payloadFrames: frames.slice(payloadStart),
     };
   }
@@ -360,8 +428,39 @@ export function parseControlFrames(frames) {
       authKey: null,
       authProof,
       topic,
+      service: null,
       payloadFrames: frames.slice(payloadStart),
     };
+  }
+
+  // ── 内部服务请求 / 响应帧：[PREFIX, "svc_req"/"svc_res", requestId, service, (AUTH_MARKER, authProof)?, ...payloadFrames] ──
+  if (
+    (action === CONTROL_SVC_REQ || action === CONTROL_SVC_RES) &&
+    frames.length >= 4
+  ) {
+    const requestId = frames[2]?.toString();
+    const service = frames[3]?.toString();
+
+    if (requestId && service) {
+      let payloadStart = 4;
+      let authProof = null;
+
+      if (frames.length >= 6 && frames[4]?.toString() === CONTROL_AUTH) {
+        authProof = frames[5]?.toString() ?? "";
+        payloadStart = 6;
+      }
+
+      return {
+        kind:
+          action === CONTROL_SVC_REQ ? "service_request" : "service_response",
+        requestId,
+        authKey: null,
+        authProof,
+        topic: null,
+        service,
+        payloadFrames: frames.slice(payloadStart),
+      };
+    }
   }
 
   // ── 请求 / 响应帧：[PREFIX, "req"/"res", requestId, ...] ─────────────────
@@ -401,6 +500,7 @@ export function parseControlFrames(frames) {
         authKey,
         authProof,
         topic: null,
+        service: null,
         payloadFrames: frames.slice(payloadStart),
       };
     }
@@ -413,6 +513,7 @@ export function parseControlFrames(frames) {
     authKey: null,
     authProof: null,
     topic: null,
+    service: null,
     payloadFrames: frames,
   };
 }

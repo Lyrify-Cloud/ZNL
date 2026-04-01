@@ -35,7 +35,7 @@ const toText = (payload) =>
 // 注册自动回复处理器：原样返回收到的 payload（echo 模式）
 master.ROUTER(async ({ identityText, payload }) => {
   const text = toText(payload);
-  console.log(`[ECHO:${identityText}] ${text}`);
+  // console.log(`[ECHO:${identityText}] ${text}`);
   // 直接返回原始 payload，slave 侧收到后进行一致性校验
   return payload;
 });

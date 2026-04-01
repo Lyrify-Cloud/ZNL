@@ -102,11 +102,11 @@ const tasks = messages.map(async (msg, index) => {
     replyObj = JSON.parse(replyText);
   } catch {}
 
-  const sentId = msg.id;
-  const backId = replyObj?.id ?? "<parse-failed>";
-  console.log(
-    `[TRACE ${index}] sentId=${sentId}  backId=${backId}  same=${sentId === backId}`,
-  );
+  // const sentId = msg.id;
+  // const backId = replyObj?.id ?? "<parse-failed>";
+  // console.log(
+  //   `[TRACE ${index}] sentId=${sentId}  backId=${backId}  same=${sentId === backId}`,
+  // );
 
   return { request: msg, replyText, replyObj };
 });

@@ -12,6 +12,12 @@ export const CONTROL_REQ = "req";
 /** 响应类型标识符 */
 export const CONTROL_RES = "res";
 
+/** 内建服务请求类型标识符 */
+export const CONTROL_SVC_REQ = "svc_req";
+
+/** 内建服务响应类型标识符 */
+export const CONTROL_SVC_RES = "svc_res";
+
 /** 认证 Key 帧标识符（位于 req 帧中） */
 export const CONTROL_AUTH = "__znl_v1_auth__";
 
@@ -32,6 +38,15 @@ export const CONTROL_PUB = "pub";
 
 /** 单向推送帧标识符（slave → master，push 时发送） */
 export const CONTROL_PUSH = "push";
+
+/** 内建文件服务名 */
+export const SERVICE_FS = "fs";
+
+/** 文件服务默认分片大小（5MB） */
+export const DEFAULT_FS_CHUNK_SIZE = 5 * 1024 * 1024;
+
+/** 文件服务会话默认存活时间（毫秒） */
+export const DEFAULT_FS_SESSION_TTL_MS = 30 * 60 * 1000;
 
 /** 空 Buffer（全局复用，避免重复分配） */
 export const EMPTY_BUFFER = Buffer.alloc(0);

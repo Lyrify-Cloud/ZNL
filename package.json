@@ -16,11 +16,17 @@
   "scripts": {
     "example:master": "node test/master/index.js",
     "example:slave": "node test/slave/index.js",
-    "test": "node test/run.js",
-    "test:unit": "node --test \"test/unit/**/*.test.js\"",
-    "test:all": "pnpm test && pnpm test:unit",
+    "test": "pnpm test:integration",
+    "test:integration": "node test/integration/index.js",
+    "test:integration:constructor": "node test/integration/run-module.js constructor",
+    "test:integration:rpc": "node test/integration/run-module.js rpc",
+    "test:integration:lifecycle": "node test/integration/run-module.js lifecycle",
+    "test:integration:pubsub": "node test/integration/run-module.js pubsub",
+    "test:integration:security": "node test/integration/run-module.js security",
+    "test:integration:fs": "node test/integration/run-module.js fs",
     "test:echo": "node test/master/test-echo-server.js",
     "test:100": "node test/slave/test-100-concurrent.js",
+    "test:load": "node test/load-report.js",
     "test:capture": "node test/capture-frames.js",
     "check": "node --check index.js && node --check src/constants.js && node --check src/protocol.js && node --check src/security.js && node --check src/PendingManager.js && node --check src/SendQueue.js && node --check src/ZNL.js && node --check test/master/index.js && node --check test/slave/index.js && node --check test/master/test-echo-server.js && node --check test/slave/test-100-concurrent.js && node --check test/run.js",
     "lint": "eslint .",
@@ -48,6 +54,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "diff": "^8.0.2",
     "zeromq": "^6.5.0"
   },
   "devDependencies": {
