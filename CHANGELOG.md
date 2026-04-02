@@ -1,5 +1,32 @@
 # 更新日志
 
+## v0.7.0
+
+### 新增
+- `slave.fs.setRoot(rootPath, policy?)` 新增 `get` 读取限制策略：
+  - `getAllowedExtensions: string[]`：限制 `master.fs.get()` 仅允许读取指定扩展名（默认常见文本类型，如 `js`、`txt`、`toml` 等）。
+  - `maxGetFileMb: number`：限制 `master.fs.get()` 单文件最大读取体积（默认 `4MB`）。
+
+### 变更
+- `master.fs.get()` 现在会执行文本类型与大小双重校验：
+  - 当文件扩展名不在 `getAllowedExtensions` 白名单时拒绝读取。
+  - 当文件大小超过 `maxGetFileMb` 时拒绝读取。
+- `get` 被限制时会返回明确错误信息，并提示使用 `master.fs.download()` 获取文件。
+- `master.fs.download()` 保持可用，用于获取超限或非文本文件。
+
+### 文档
+- `README.md` 补充 `getAllowedExtensions` 与 `maxGetFileMb` 配置说明及默认行为。
+- `docs/README.api.md` 补充策略字段、行为说明、失败原因与示例配置。
+
+### 测试
+- `fs` 集成测试新增用例：`plain 模式：get 限制扩展名与大小，超限应通过 download`。
+- 覆盖点包括：
+  - 允许文本扩展名文件 `get` 成功
+  - 非白名单扩展名 `get` 被拒绝
+  - 超大小文件 `get` 被拒绝
+  - 上述受限文件可通过 `download` 成功获取且内容一致
+- 自动执行 `pnpm test` 与 `pnpm test:integration:fs`，测试通过。
+
 ## v0.6.9
 
 ### 新增

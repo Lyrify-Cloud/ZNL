@@ -811,6 +811,8 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 | `allowUpload` | `boolean` | `true` | 是否允许 `master.fs.upload()` |
 | `allowedPaths` | `string[]` | `[]` | 路径白名单；非空时，只有命中的路径才允许访问 |
 | `denyGlobs` | `string[]` | `[]` | 拒绝规则；命中后直接拒绝访问 |
+| `getAllowedExtensions` | `string[]` | 常见文本扩展名集合 | 限制 `master.fs.get()` 允许读取的扩展名（仅文本类） |
+| `maxGetFileMb` | `number` | `4` | 限制 `master.fs.get()` 单文件最大读取体积（MB） |
 
 #### `policy` 的真实行为
 
@@ -828,7 +830,8 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 并且：
 
 - `readOnly=true` 时，`allowDelete / allowPatch / allowUpload` 会被视为不可用
-- `list()` / `stat()` / `get()` / `download()` 仍允许执行
+- `list()` / `stat()` / `download()` 仍允许执行
+- `get()` 仍属于读操作，但会继续受 `getAllowedExtensions` 与 `maxGetFileMb` 限制
 
 2. `allowDelete: false`
 
@@ -910,6 +913,8 @@ ZNL 内建一个独立于业务 `req/res` 的 service 通道。
 - `allowDelete=false`
 - `allowPatch=false`
 - `allowUpload=false`
+- `getAllowedExtensions` 未命中（例如 `.bin` 这类非文本扩展名）
+- 文件大小超过 `maxGetFileMb`（需改用 `master.fs.download()`）
 
 建议：
 
@@ -936,6 +941,8 @@ slave.fs.setRoot("./storage", {
   allowUpload: true,
   allowedPaths: ["public/**", "configs"],
   denyGlobs: ["**/*.secret.txt", "private/**"],
+  getAllowedExtensions: ["txt", "md", "json", "js", "ts", "toml", "yaml", "yml"],
+  maxGetFileMb: 4,
 });
 ```
 

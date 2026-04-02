@@ -100,6 +100,52 @@ function normalizePatchText(rawPatch) {
     .replace(/\s+$/u, "");
 }
 
+function normalizePolicyExtensionList(value) {
+  const fallback = [
+    "txt",
+    "md",
+    "json",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "mts",
+    "cts",
+    "jsx",
+    "tsx",
+    "toml",
+    "yaml",
+    "yml",
+    "ini",
+    "conf",
+    "env",
+    "xml",
+    "csv",
+    "log",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "less",
+    "sql",
+    "sh",
+    "bat",
+    "ps1",
+  ];
+
+  const source = Array.isArray(value) ? value : fallback;
+  const normalized = source
+    .map((item) =>
+      String(item ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/^\./, ""),
+    )
+    .filter(Boolean);
+
+  return Array.from(new Set(normalized));
+}
+
 function normalizePolicy(policy = {}) {
   if (!policy || typeof policy !== "object") {
     return {
@@ -109,6 +155,8 @@ function normalizePolicy(policy = {}) {
       allowUpload: true,
       allowedPaths: [],
       denyGlobs: [],
+      getAllowedExtensions: normalizePolicyExtensionList(),
+      maxGetFileMb: 4,
     };
   }
 
@@ -119,6 +167,12 @@ function normalizePolicy(policy = {}) {
           .map((item) => toPosixPath(String(item).trim()))
       : [];
 
+  const rawMaxGetFileMb = Number(policy.maxGetFileMb);
+  const maxGetFileMb =
+    Number.isFinite(rawMaxGetFileMb) && rawMaxGetFileMb > 0
+      ? rawMaxGetFileMb
+      : 4;
+
   return {
     readOnly: Boolean(policy.readOnly),
     allowDelete:
@@ -128,6 +182,10 @@ function normalizePolicy(policy = {}) {
       policy.allowUpload == null ? true : Boolean(policy.allowUpload),
     allowedPaths: toList(policy.allowedPaths),
     denyGlobs: toList(policy.denyGlobs),
+    getAllowedExtensions: normalizePolicyExtensionList(
+      policy.getAllowedExtensions,
+    ),
+    maxGetFileMb,
   };
 }
 
@@ -217,6 +275,46 @@ function sanitizeListEntry(entry, stats) {
     isDirectory: Boolean(stats?.isDirectory?.()),
     isSymbolicLink: Boolean(stats?.isSymbolicLink?.()),
   };
+}
+
+function getFileExtension(targetPath) {
+  return path
+    .extname(String(targetPath ?? ""))
+    .toLowerCase()
+    .replace(/^\./, "");
+}
+
+function formatMb(sizeInBytes) {
+  const bytes = Number(sizeInBytes ?? 0);
+  const mb = bytes / (1024 * 1024);
+  return mb.toFixed(2);
+}
+
+function ensureGetPolicyAccess(currentPolicy, absolutePath, stat) {
+  const ext = getFileExtension(absolutePath);
+  const allowList = Array.isArray(currentPolicy?.getAllowedExtensions)
+    ? currentPolicy.getAllowedExtensions
+    : [];
+
+  if (!ext || !allowList.includes(ext)) {
+    throw new Error(
+      `get 仅允许读取文本文件（如 js/txt/toml），当前扩展名 ".${ext || "unknown"}" 不在允许列表中。请使用 download。`,
+    );
+  }
+
+  const maxGetFileMb = Number(currentPolicy?.maxGetFileMb ?? 0);
+  const maxGetFileBytes = Math.floor(maxGetFileMb * 1024 * 1024);
+  const fileSize = Number(stat?.size ?? 0);
+
+  if (
+    Number.isFinite(maxGetFileBytes) &&
+    maxGetFileBytes > 0 &&
+    fileSize > maxGetFileBytes
+  ) {
+    throw new Error(
+      `文件大小 ${formatMb(fileSize)}MB 超过 get 限制 ${maxGetFileMb}MB，请使用 download。`,
+    );
+  }
 }
 
 async function ensureNoSymlinkInPath(
@@ -545,6 +643,8 @@ export function createSlaveFsApi(slave) {
     if (!stat.isFile()) {
       throw new Error("目标不是文件。");
     }
+
+    ensureGetPolicyAccess(policy, targetInfo.absolutePath, stat);
 
     const buffer = await fs.readFile(targetInfo.absolutePath);
     return buildRpcPayload(

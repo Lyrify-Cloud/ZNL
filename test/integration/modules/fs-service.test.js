@@ -894,6 +894,136 @@ export async function runFsServiceTests(runner) {
   );
 
   await runner.test(
+    "plain 模式：get 限制扩展名与大小，超限应通过 download",
+    async () => {
+      const EP_FS_GET_LIMIT = takeEndpoint();
+      const baseDir = path.resolve("test/tmp/fs-get-limit");
+      const rootDir = path.join(baseDir, "remote");
+      const downloadLargeTarget = path.join(baseDir, "large-downloaded.txt");
+      const downloadBinTarget = path.join(baseDir, "raw-downloaded.bin");
+
+      const allowedText = "console.log('hello get limit');\n";
+      const largeText = "L".repeat(256);
+      const binSource = Buffer.from([0, 1, 2, 3, 4, 5]);
+
+      await resetDir(baseDir);
+      await fs.mkdir(rootDir, { recursive: true });
+      await fs.writeFile(path.join(rootDir, "allowed.js"), allowedText, "utf8");
+      await fs.writeFile(path.join(rootDir, "large.txt"), largeText, "utf8");
+      await fs.writeFile(path.join(rootDir, "raw.bin"), binSource);
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-fs-get-limit",
+        endpoints: { router: EP_FS_GET_LIMIT },
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-fs-get-limit",
+        endpoints: { router: EP_FS_GET_LIMIT },
+      });
+
+      slave.fs.setRoot(rootDir, {
+        getAllowedExtensions: ["js", "txt", "toml"],
+        maxGetFileMb: 0.0001,
+      });
+
+      try {
+        await master.start();
+        await slave.start();
+        await delay(250);
+
+        const registered = await waitForRegistered(master, "s-fs-get-limit", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
+        runner.assert(
+          registered,
+          `get 限制测试 slave 已注册 → ${master.slaves}`,
+        );
+
+        const allowedGet = await master.fs.get("s-fs-get-limit", "allowed.js", {
+          timeoutMs: scaleMs(2000),
+        });
+        runner.assert(
+          readFsBodyText(allowedGet) === allowedText,
+          `允许扩展名 get 正常 → "${readFsBodyText(allowedGet)}"`,
+        );
+
+        const blockedExtGet = await expectRejected(
+          () =>
+            master.fs.get("s-fs-get-limit", "raw.bin", {
+              timeoutMs: scaleMs(2000),
+            }),
+          ["扩展名", "文本文件", "download", "允许"],
+        );
+
+        const blockedSizeGet = await expectRejected(
+          () =>
+            master.fs.get("s-fs-get-limit", "large.txt", {
+              timeoutMs: scaleMs(2000),
+            }),
+          ["超过", "限制", "download", "大小"],
+        );
+
+        runner.assert(
+          blockedExtGet.matched && blockedSizeGet.matched,
+          `get 限制命中 → ext: ${blockedExtGet.message} | size: ${blockedSizeGet.message}`,
+        );
+
+        const downloadBin = await master.fs.download(
+          "s-fs-get-limit",
+          "raw.bin",
+          downloadBinTarget,
+          {
+            timeoutMs: scaleMs(3000),
+            chunkSize: 64 * 1024,
+          },
+        );
+        runner.assert(
+          downloadBin.ok === true,
+          "扩展名受限文件 download 应允许",
+        );
+
+        const downloadLarge = await master.fs.download(
+          "s-fs-get-limit",
+          "large.txt",
+          downloadLargeTarget,
+          {
+            timeoutMs: scaleMs(3000),
+            chunkSize: 64 * 1024,
+          },
+        );
+        runner.assert(downloadLarge.ok === true, "超大小文件 download 应允许");
+
+        const downloadedBin = await fs.readFile(downloadBinTarget);
+        runner.assert(
+          downloadedBin.equals(binSource),
+          `受限扩展名文件 download 内容正确 → bytes=${downloadedBin.length}`,
+        );
+
+        const downloadedLargeText = await fs.readFile(
+          downloadLargeTarget,
+          "utf8",
+        );
+        runner.assert(
+          downloadedLargeText === largeText,
+          `超大小文件 download 内容正确 → len=${downloadedLargeText.length}`,
+        );
+
+        runner.assert(
+          (await pathExists(downloadBinTarget)) &&
+            (await pathExists(downloadLargeTarget)),
+          "download 回退应生成目标文件",
+        );
+      } finally {
+        await safeStop(slave, master);
+        await fs.rm(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  await runner.test(
     "encrypted 模式：fs get + upload/download 正常",
     async () => {
       const EP_FS_ENC = takeEndpoint();

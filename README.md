@@ -218,6 +218,8 @@ slave.fs.setRoot("./storage", {
   allowUpload: true,
   allowedPaths: ["public/**", "configs/app.json"],
   denyGlobs: ["**/*.secret.txt", "private/**"],
+  getAllowedExtensions: ["txt", "md", "json", "js", "ts", "toml", "yaml", "yml"],
+  maxGetFileMb: 4,
 });
 
 await slave.start();
@@ -255,6 +257,14 @@ await slave.start();
   - 可选黑名单 glob
   - 命中后直接拒绝访问
   - 例如：`"**/*.secret.txt"`, `"private/**"`
+- `getAllowedExtensions: string[]`
+  - 限制 `master.fs.get()` 允许读取的文件扩展名（仅文本类文件）
+  - 默认包含常见文本扩展名（如 `js`、`txt`、`toml` 等）
+  - 不在列表中的文件会被拒绝，并提示改用 `master.fs.download()`
+- `maxGetFileMb: number`
+  - 限制 `master.fs.get()` 单文件最大读取大小（单位 MB）
+  - 默认 `4`
+  - 超出限制会报错，并提示改用 `master.fs.download()`
 
 建议：
 
