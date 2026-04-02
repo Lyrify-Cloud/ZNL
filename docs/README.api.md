@@ -1376,6 +1376,7 @@ slave.fs.setRoot("./storage", {
 | `options` | `object` | 否 | 上传配置 |
 | `options.chunkSize` | `number` | 否 | 分片大小 |
 | `options.timeoutMs` | `number` | 否 | 单次 service 请求超时 |
+| `options.onProgress` | `(event) => void` | 否 | 传输进度回调，按 `init/chunk/complete` 阶段触发 |
 
 #### `remotePath` 路径语义
 
@@ -1449,6 +1450,28 @@ slave.fs.setRoot("./storage", {
 
 这些结构由 `upload()` 内部消费，用于断点续传和分片确认。
 
+#### `onProgress(event)` 回调字段（upload）
+
+`event` 常见字段如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `direction` | `"upload"` | 传输方向 |
+| `phase` | `"init" \| "chunk" \| "complete"` | 进度阶段 |
+| `slaveId` | `string` | 目标从节点 ID |
+| `sessionId` | `string` | 会话 ID |
+| `localPath` | `string` | 本地文件路径 |
+| `remotePath` | `string` | 远端目标路径 |
+| `transferred` | `number` | 已传输字节数 |
+| `total` | `number` | 文件总字节数 |
+| `percent` | `number` | 进度百分比（0~100） |
+| `speedBps` | `number` | 当前估算传输速度（字节/秒） |
+| `etaSeconds` | `number \| null` | 预计剩余秒数；无法估算时为 `null` |
+| `totalChunks` | `number` | 总分片数 |
+| `chunkId` | `number` | 当前分片 ID（`chunk` 阶段） |
+| `size` | `number` | 当前分片字节数（`chunk` 阶段） |
+| `meta` | `object` | 完成阶段返回元信息（`complete` 阶段） |
+
 #### 特点
 
 - 分片传输
@@ -1485,6 +1508,29 @@ slave.fs.setRoot("./storage", {
 | `options` | `object` | 否 | 下载配置 |
 | `options.chunkSize` | `number` | 否 | 分片大小 |
 | `options.timeoutMs` | `number` | 否 | 单次 service 请求超时 |
+| `options.onProgress` | `(event) => void` | 否 | 传输进度回调，按 `init/chunk/complete` 阶段触发 |
+
+#### `onProgress(event)` 回调字段（download）
+
+`event` 常见字段如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `direction` | `"download"` | 传输方向 |
+| `phase` | `"init" \| "chunk" \| "complete"` | 进度阶段 |
+| `slaveId` | `string` | 目标从节点 ID |
+| `sessionId` | `string` | 会话 ID |
+| `remotePath` | `string` | 远端源文件路径 |
+| `localPath` | `string` | 本地目标路径 |
+| `transferred` | `number` | 已传输字节数 |
+| `total` | `number` | 文件总字节数 |
+| `percent` | `number` | 进度百分比（0~100） |
+| `speedBps` | `number` | 当前估算传输速度（字节/秒） |
+| `etaSeconds` | `number \| null` | 预计剩余秒数；无法估算时为 `null` |
+| `totalChunks` | `number` | 总分片数 |
+| `chunkId` | `number` | 当前分片 ID（`chunk` 阶段） |
+| `size` | `number` | 当前分片字节数（`chunk` 阶段） |
+| `meta` | `object` | 完成阶段返回元信息（`complete` 阶段） |
 
 #### 返回值
 

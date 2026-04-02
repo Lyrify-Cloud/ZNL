@@ -276,6 +276,14 @@ await slave.start();
 - `master.fs.upload(slaveId, localPath, remotePath, options?)`
 - `master.fs.download(slaveId, remotePath, localPath, options?)`
 
+上传/下载进度回调（`options.onProgress(event)`）：
+
+- `master.fs.upload()` 与 `master.fs.download()` 都支持可选 `onProgress` 回调
+- `event.phase`：`"init"`、`"chunk"`、`"complete"`
+- 常用字段：`direction`、`phase`、`slaveId`、`sessionId`、`localPath`、`remotePath`、`transferred`、`total`、`percent`、`chunkId`、`totalChunks`、`size`
+- 速率与预计时间：`speedBps`（字节/秒）、`etaSeconds`（预计剩余秒数；无法估算时为 `null`）
+- `complete` 阶段额外包含 `meta`（完成阶段返回元信息）
+
 `upload(remotePath)` 路径语义（`localPath` 必须是本地文件）：
 
 - 当 `remotePath` 以 `/` 或 `\` 结尾时，按“目录路径”处理，自动落盘为 `remotePath + basename(localPath)`

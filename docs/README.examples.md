@@ -1012,6 +1012,33 @@ await master.fs.upload(
 );
 ```
 
+### 22.5 上传进度（onProgress，含速度与 ETA）
+
+```js
+await master.fs.upload(
+  "slave-001",
+  "./local/big-file.zip",
+  "packages/",
+  {
+    chunkSize: 1024 * 1024,
+    timeoutMs: 15000,
+    onProgress: (event) => {
+      const percent = Number(event.percent ?? 0).toFixed(1);
+      const speedBps = Number(event.speedBps ?? 0);
+      const speedMBps = (speedBps / 1024 / 1024).toFixed(2);
+      const eta =
+        event.etaSeconds == null ? "--:--" : `${Math.ceil(event.etaSeconds)}s`;
+
+      console.log(
+        `[upload] phase=${event.phase} ${percent}% ` +
+          `${event.transferred}/${event.total} bytes ` +
+          `speed=${speedMBps} MB/s eta=${eta}`,
+      );
+    },
+  },
+);
+```
+
 说明：
 
 - 默认分片大小为 `5MB`
@@ -1019,6 +1046,11 @@ await master.fs.upload(
 - 支持断点续传
 - 适合大文件
 - 上传不会把已有目录替换成文件（目录目标会被安全处理）
+- `onProgress(event)` 常用字段：
+  - `phase`：`init` / `chunk` / `complete`
+  - `transferred`、`total`、`percent`
+  - `speedBps`（字节/秒）
+  - `etaSeconds`（预计剩余秒数，无法估算时为 `null`）
 
 推荐：
 
@@ -1053,12 +1085,44 @@ await master.fs.download(
 );
 ```
 
+### 23.3 下载进度（onProgress，含速度与 ETA）
+
+```js
+await master.fs.download(
+  "slave-001",
+  "packages/big-file.zip",
+  "./downloads/big-file.zip",
+  {
+    chunkSize: 1024 * 1024,
+    timeoutMs: 15000,
+    onProgress: (event) => {
+      const percent = Number(event.percent ?? 0).toFixed(1);
+      const speedBps = Number(event.speedBps ?? 0);
+      const speedMBps = (speedBps / 1024 / 1024).toFixed(2);
+      const eta =
+        event.etaSeconds == null ? "--:--" : `${Math.ceil(event.etaSeconds)}s`;
+
+      console.log(
+        `[download] phase=${event.phase} ${percent}% ` +
+          `${event.transferred}/${event.total} bytes ` +
+          `speed=${speedMBps} MB/s eta=${eta}`,
+      );
+    },
+  },
+);
+```
+
 说明：
 
 - 支持分片传输
 - 支持断点续传
 - 本地先写 `.tmp` 文件
 - 完整后再重命名到目标文件
+- `onProgress(event)` 常用字段：
+  - `phase`：`init` / `chunk` / `complete`
+  - `transferred`、`total`、`percent`
+  - `speedBps`（字节/秒）
+  - `etaSeconds`（预计剩余秒数，无法估算时为 `null`）
 
 这可以降低下载中断时目标文件损坏的风险。
 

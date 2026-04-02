@@ -30,6 +30,77 @@ function createSessionId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function resolveProgressHandler(options) {
+  const onProgress = options?.onProgress;
+  return typeof onProgress === "function" ? onProgress : null;
+}
+
+function progressPercent(transferred, total) {
+  const n = Number(transferred ?? 0);
+  const t = Number(total ?? 0);
+
+  if (!Number.isFinite(t) || t <= 0) return 100;
+  if (!Number.isFinite(n) || n <= 0) return 0;
+
+  return Math.max(0, Math.min(100, (n / t) * 100));
+}
+
+function emitProgress(onProgress, payload) {
+  if (!onProgress) return;
+  try {
+    onProgress(payload);
+  } catch {}
+}
+
+function createProgressCalculator() {
+  let startedAt = 0;
+  let lastSampleAt = 0;
+  let lastSampleBytes = 0;
+  let smoothedBps = 0;
+
+  return (transferred, total, phase = "chunk") => {
+    const nowTs = Date.now();
+    const n = Number(transferred ?? 0);
+    const t = Number(total ?? 0);
+    const bytes = Number.isFinite(n) && n > 0 ? n : 0;
+    const totalBytes = Number.isFinite(t) && t >= 0 ? t : 0;
+
+    if (startedAt === 0 || phase === "init") {
+      startedAt = nowTs;
+      lastSampleAt = nowTs;
+      lastSampleBytes = bytes;
+      smoothedBps = 0;
+    }
+
+    const deltaMs = Math.max(0, nowTs - lastSampleAt);
+    const deltaBytes = Math.max(0, bytes - lastSampleBytes);
+
+    if (deltaMs > 0) {
+      const instantBps = (deltaBytes * 1000) / deltaMs;
+      if (instantBps > 0) {
+        smoothedBps =
+          smoothedBps > 0 ? smoothedBps * 0.75 + instantBps * 0.25 : instantBps;
+      }
+      lastSampleAt = nowTs;
+      lastSampleBytes = bytes;
+    }
+
+    const elapsedMs = Math.max(1, nowTs - startedAt);
+    const avgBps = bytes > 0 ? (bytes * 1000) / elapsedMs : 0;
+    const speedBps = smoothedBps > 0 ? smoothedBps : avgBps;
+
+    const remaining = Math.max(0, totalBytes - bytes);
+    const etaSeconds =
+      remaining <= 0 ? 0 : speedBps > 0 ? remaining / speedBps : null;
+
+    return {
+      percent: progressPercent(bytes, totalBytes),
+      speedBps,
+      etaSeconds,
+    };
+  };
+}
+
 function assertOk(meta, fallbackOp = "file/unknown") {
   const op = String(meta?.op ?? fallbackOp);
   if (meta?.ok === false) {
@@ -224,6 +295,7 @@ export function createMasterFsApi(master) {
 
     async upload(slaveId, localPath, remotePath, options = {}) {
       const opts = normalizeOptions(options);
+      const onProgress = resolveProgressHandler(opts);
       const chunkSize = normalizeChunkSize(opts.chunkSize);
       const sessionId = toSessionId(opts.sessionId ?? createSessionId());
       const absolutePath = path.resolve(String(localPath ?? ""));
@@ -257,6 +329,21 @@ export function createMasterFsApi(master) {
 
       const totalChunks = Math.ceil(stat.size / chunkSize);
       let chunkId = Math.floor(offset / chunkSize);
+      const calcProgress = createProgressCalculator();
+
+      emitProgress(onProgress, {
+        direction: "upload",
+        phase: "init",
+        slaveId,
+        sessionId,
+        localPath: absolutePath,
+        remotePath: String(remotePath ?? ""),
+        transferred: offset,
+        total: stat.size,
+        totalChunks,
+        chunkId,
+        ...calcProgress(offset, stat.size, "init"),
+      });
 
       const handle = await fs.open(absolutePath, "r");
       try {
@@ -306,6 +393,21 @@ export function createMasterFsApi(master) {
 
           offset += chunk.length;
           chunkId += 1;
+
+          emitProgress(onProgress, {
+            direction: "upload",
+            phase: "chunk",
+            slaveId,
+            sessionId,
+            localPath: absolutePath,
+            remotePath: String(remotePath ?? ""),
+            transferred: offset,
+            total: stat.size,
+            totalChunks,
+            chunkId: chunkId - 1,
+            size: chunk.length,
+            ...calcProgress(offset, stat.size, "chunk"),
+          });
         }
 
         const complete = await request(
@@ -324,7 +426,23 @@ export function createMasterFsApi(master) {
           opts,
         );
 
-        return assertOk(complete.meta, OPS.COMPLETE);
+        const meta = assertOk(complete.meta, OPS.COMPLETE);
+
+        emitProgress(onProgress, {
+          direction: "upload",
+          phase: "complete",
+          slaveId,
+          sessionId,
+          localPath: absolutePath,
+          remotePath: String(remotePath ?? ""),
+          transferred: stat.size,
+          total: stat.size,
+          totalChunks,
+          ...calcProgress(stat.size, stat.size, "complete"),
+          meta,
+        });
+
+        return meta;
       } finally {
         await handle.close();
       }
@@ -332,6 +450,7 @@ export function createMasterFsApi(master) {
 
     async download(slaveId, remotePath, localPath, options = {}) {
       const opts = normalizeOptions(options);
+      const onProgress = resolveProgressHandler(opts);
       const chunkSize = normalizeChunkSize(opts.chunkSize);
       const sessionId = toSessionId(opts.sessionId ?? createSessionId());
       const absolutePath = path.resolve(String(localPath ?? ""));
@@ -375,6 +494,21 @@ export function createMasterFsApi(master) {
         Number.isFinite(resumeOffset) && resumeOffset > 0 ? resumeOffset : 0;
 
       const totalChunks = Math.ceil(fileSize / chunkSize);
+      const calcProgress = createProgressCalculator();
+
+      emitProgress(onProgress, {
+        direction: "download",
+        phase: "init",
+        slaveId,
+        sessionId,
+        remotePath: String(remotePath ?? ""),
+        localPath: absolutePath,
+        transferred: offset,
+        total: fileSize,
+        totalChunks,
+        chunkId: Math.floor(offset / chunkSize),
+        ...calcProgress(offset, fileSize, "init"),
+      });
 
       const createHandle = await fs.open(tmpPath, "a");
       await createHandle.close();
@@ -412,6 +546,21 @@ export function createMasterFsApi(master) {
 
           offset += chunk.length;
           chunkId += 1;
+
+          emitProgress(onProgress, {
+            direction: "download",
+            phase: "chunk",
+            slaveId,
+            sessionId,
+            remotePath: String(remotePath ?? ""),
+            localPath: absolutePath,
+            transferred: offset,
+            total: fileSize,
+            totalChunks,
+            chunkId: chunkId - 1,
+            size: chunk.length,
+            ...calcProgress(offset, fileSize, "chunk"),
+          });
         }
       } finally {
         await handle.close();
@@ -435,7 +584,23 @@ export function createMasterFsApi(master) {
         opts,
       );
 
-      return assertOk(complete.meta, OPS.DOWNLOAD_COMPLETE);
+      const meta = assertOk(complete.meta, OPS.DOWNLOAD_COMPLETE);
+
+      emitProgress(onProgress, {
+        direction: "download",
+        phase: "complete",
+        slaveId,
+        sessionId,
+        remotePath: String(remotePath ?? ""),
+        localPath: absolutePath,
+        transferred: fileSize,
+        total: fileSize,
+        totalChunks,
+        ...calcProgress(fileSize, fileSize, "complete"),
+        meta,
+      });
+
+      return meta;
     },
   };
 }

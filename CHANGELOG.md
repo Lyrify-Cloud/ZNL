@@ -1,5 +1,42 @@
 # 更新日志
 
+## v0.6.9
+
+### 新增
+- `master.fs.upload()` 与 `master.fs.download()` 新增可选进度回调：`options.onProgress(event)`。
+- 进度事件支持分阶段上报：`init`、`chunk`、`complete`。
+- 进度事件字段包含：
+  - `direction`（`upload` / `download`）
+  - `phase`
+  - `slaveId`、`sessionId`
+  - `localPath`、`remotePath`
+  - `transferred`、`total`、`percent`
+  - `speedBps`（字节/秒）
+  - `etaSeconds`（预计剩余秒数，无法估算时为 `null`）
+  - `chunkId`、`totalChunks`、`size`
+  - `meta`（完成阶段）
+
+### 变更
+- `test/master/index.js` 交互式 CLI 增强上传/下载可视化进度展示：
+  - 普通终端模式实时显示百分比与已传/总量
+  - 新增传输速度（`MB/s`）与 ETA（剩余时间）显示
+  - TTY 场景下使用单行刷新，完成后自动换行
+- `--json` 模式下的 `fs.progress` 事件新增：
+  - `speedBps`
+  - `etaSeconds`
+- 进度输出增加节流与平滑处理，减少刷屏并提升观感。
+
+### 文档
+- `README.md` 补充 `onProgress(event)` 的字段说明，明确包含 `speedBps` 与 `etaSeconds`。
+- `docs/README.api.md` 在 `master.fs.upload()` / `master.fs.download()` 的 `onProgress` 字段表中补充 `speedBps` 与 `etaSeconds`。
+- `docs/README.examples.md` 新增上传/下载进度示例代码，演示如何消费 `onProgress` 并输出速度与 ETA。
+
+### 测试
+- 自动执行 `pnpm test`：
+  - 用例通过：`76/76`
+  - 断言通过：`238/238`
+  - 失败：`0`
+
 ## v0.6.8
 
 ### 变更

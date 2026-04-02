@@ -154,6 +154,94 @@ const formatSize = (size) => {
   return `${current.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
 };
 
+const createProgressReporter = ({
+  direction,
+  slaveId,
+  sourcePath,
+  targetPath,
+}) => {
+  let lastPercent = -1;
+  let lastEmitAt = 0;
+
+  const formatEta = (seconds) => {
+    const safe =
+      Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds) : 0;
+    const h = Math.floor(safe / 3600);
+    const m = Math.floor((safe % 3600) / 60);
+    const s = safe % 60;
+    if (h > 0)
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  };
+
+  return (event = {}) => {
+    const phase = String(event.phase ?? "chunk");
+    const percentRaw = Number(event.percent ?? 0);
+    const transferred = Number(event.transferred ?? 0);
+    const total = Number(event.total ?? 0);
+    const percent = Number.isFinite(percentRaw)
+      ? Math.max(0, Math.min(100, percentRaw))
+      : 0;
+
+    const rounded = Math.floor(percent);
+    const nowTs = Date.now();
+    const isFinal = phase === "complete";
+    const isInit = phase === "init";
+    const shouldThrottle = !isFinal && !isInit;
+
+    const speedBpsRaw = Number(event.speedBps ?? 0);
+    const speedBps =
+      Number.isFinite(speedBpsRaw) && speedBpsRaw >= 0 ? speedBpsRaw : 0;
+    const etaRaw = event.etaSeconds;
+    const etaSeconds =
+      etaRaw === null || etaRaw === undefined
+        ? null
+        : Number.isFinite(Number(etaRaw)) && Number(etaRaw) >= 0
+          ? Number(etaRaw)
+          : null;
+    const etaText = etaSeconds === null ? "--:--" : formatEta(etaSeconds);
+
+    if (shouldThrottle && rounded === lastPercent && nowTs - lastEmitAt < 120) {
+      return;
+    }
+
+    lastPercent = rounded;
+    lastEmitAt = nowTs;
+
+    if (JSON_MODE) {
+      emitJson("fs.progress", {
+        ok: true,
+        direction,
+        phase,
+        slaveId,
+        sourcePath,
+        targetPath,
+        sessionId: event.sessionId ?? null,
+        transferred,
+        total,
+        percent: Number(percent.toFixed(2)),
+        speedBps: Number(speedBps.toFixed(2)),
+        etaSeconds: etaSeconds === null ? null : Number(etaSeconds.toFixed(2)),
+        chunkId: event.chunkId ?? null,
+        totalChunks: event.totalChunks ?? null,
+        size: event.size ?? null,
+      });
+      return;
+    }
+
+    const line = `[MASTER][FS][${direction.toUpperCase()}] ${percent.toFixed(1)}% ${formatSize(transferred)} / ${formatSize(total)}  ${formatSize(speedBps)}/s  ETA ${etaText}`;
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r${line}`);
+      if (isFinal) {
+        process.stdout.write("\n");
+      }
+      return;
+    }
+
+    console.log(line);
+  };
+};
+
 const normalizeRemote = (targetPath) => {
   const raw = String(targetPath ?? "").trim();
   if (!raw || raw === ".") return ".";
@@ -826,8 +914,16 @@ async function handleFs(args) {
         );
       }
 
+      const reportProgress = createProgressReporter({
+        direction: "upload",
+        slaveId,
+        sourcePath: localPath,
+        targetPath: `${slaveId}:${remotePath}`,
+      });
+
       const meta = await master.fs.upload(slaveId, localPath, remotePath, {
         timeoutMs: 15000,
+        onProgress: reportProgress,
       });
 
       output(
@@ -861,8 +957,16 @@ async function handleFs(args) {
         );
       }
 
+      const reportProgress = createProgressReporter({
+        direction: "download",
+        slaveId,
+        sourcePath: `${slaveId}:${remotePath}`,
+        targetPath: localPath,
+      });
+
       const meta = await master.fs.download(slaveId, remotePath, localPath, {
         timeoutMs: 15000,
+        onProgress: reportProgress,
       });
 
       output(
