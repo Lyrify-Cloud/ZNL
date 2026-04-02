@@ -18,7 +18,7 @@ import {
   installTimeoutScaling,
   safeStop,
   toText,
-  waitForSlave,
+  waitForRegistered,
 } from "../helpers/common.js";
 
 installTimeoutScaling();
@@ -746,7 +746,10 @@ export async function runSecurityTests(runner) {
     await delay(150);
 
     try {
-      const registeredBefore = await waitForSlave(master, "sSw", 3000);
+      const registeredBefore = await waitForRegistered(master, "sSw", {
+        timeoutMs: 3000,
+        intervalMs: 100,
+      });
       runner.assert(registeredBefore, `切换前已注册 → ${master.slaves}`);
 
       const r1 = await slave1.DEALER("before-switch", { timeoutMs: 1500 });
@@ -783,7 +786,12 @@ export async function runSecurityTests(runner) {
         let replyError = null;
 
         for (let i = 0; i < 8; i++) {
-          registered = registered || (await waitForSlave(master, "sSw", 800));
+          registered =
+            registered ||
+            (await waitForRegistered(master, "sSw", {
+              timeoutMs: 800,
+              intervalMs: 100,
+            }));
           try {
             reply = await slave2.DEALER("after-reconnect", {
               timeoutMs: 1200,

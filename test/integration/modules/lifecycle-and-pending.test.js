@@ -8,6 +8,7 @@ import {
   toText,
   scaleMs,
 } from "../helpers/common.js";
+import { expectRejected } from "../helpers/assertions.js";
 
 installTimeoutScaling();
 
@@ -106,29 +107,26 @@ export async function runLifecycleAndPendingTests(runner) {
       endpoints: { router: EP_PRE },
     });
 
-    let dealerError = null;
-    let routerError = null;
-
-    try {
-      await slave.DEALER("ping", { timeoutMs: 200 });
-    } catch (error) {
-      dealerError = error;
-    }
-
-    try {
-      await master.ROUTER("s-pre", "ping", { timeoutMs: 200 });
-    } catch (error) {
-      routerError = error;
-    }
-
-    runner.assert(
-      String(dealerError?.message ?? dealerError).includes("socket"),
-      `DEALER 未 start 抛错 → "${dealerError?.message ?? dealerError}"`,
+    const dealerResult = await expectRejected(
+      () => slave.DEALER("ping", { timeoutMs: 200 }),
+      ["socket"],
     );
 
+    const routerResult = await expectRejected(
+      () => master.ROUTER("s-pre", "ping", { timeoutMs: 200 }),
+      ["socket"],
+    );
+
+    runner.assert(dealerResult.rejected, "DEALER 未 start 应抛错");
     runner.assert(
-      String(routerError?.message ?? routerError).includes("socket"),
-      `ROUTER 未 start 抛错 → "${routerError?.message ?? routerError}"`,
+      dealerResult.matched,
+      `DEALER 未 start 抛错 → "${dealerResult.message}"`,
+    );
+
+    runner.assert(routerResult.rejected, "ROUTER 未 start 应抛错");
+    runner.assert(
+      routerResult.matched,
+      `ROUTER 未 start 抛错 → "${routerResult.message}"`,
     );
   });
 
@@ -155,23 +153,22 @@ export async function runLifecycleAndPendingTests(runner) {
         await delay(100);
 
         const startAt = Date.now();
+        const timeoutResult = await expectRejected(
+          () => slave.DEALER("no-reply", { timeoutMs: 400 }),
+          ["请求超时"],
+        );
+        const elapsed = Date.now() - startAt;
 
-        try {
-          await slave.DEALER("no-reply", { timeoutMs: 400 });
-          runner.fail("不应收到响应");
-        } catch (error) {
-          const elapsed = Date.now() - startAt;
+        runner.assert(timeoutResult.rejected, "无处理器时应超时 reject");
+        runner.assert(
+          timeoutResult.matched,
+          `正确超时 → "${timeoutResult.message}"`,
+        );
 
-          runner.assert(
-            String(error?.message ?? error).includes("请求超时"),
-            `正确超时 → "${error?.message ?? error}"`,
-          );
-
-          runner.assert(
-            elapsed >= scaleMs(380) && elapsed < scaleMs(1500),
-            `超时时机合理 → ${elapsed}ms`,
-          );
-        }
+        runner.assert(
+          elapsed >= scaleMs(380) && elapsed < scaleMs(1500),
+          `超时时机合理 → ${elapsed}ms`,
+        );
       } finally {
         await safeStop(slave, master);
       }
@@ -205,17 +202,15 @@ export async function runLifecycleAndPendingTests(runner) {
       await delay(150);
 
       const first = slave.DEALER("one", { timeoutMs: 1000 });
-      let error = null;
+      const secondResult = await expectRejected(
+        () => slave.DEALER("two", { timeoutMs: 300 }),
+        ["并发请求数已达上限"],
+      );
 
-      try {
-        await slave.DEALER("two", { timeoutMs: 300 });
-      } catch (thrown) {
-        error = thrown;
-      }
-
+      runner.assert(secondResult.rejected, "第二个请求应被拒绝");
       runner.assert(
-        String(error?.message ?? error).includes("并发请求数已达上限"),
-        `maxPending 拒绝新请求 → "${error?.message ?? error}"`,
+        secondResult.matched,
+        `maxPending 拒绝新请求 → "${secondResult.message}"`,
       );
 
       const firstReply = await first;
@@ -258,16 +253,16 @@ export async function runLifecycleAndPendingTests(runner) {
       await delay(150);
       await slave.stop();
 
-      try {
-        await requestPromise;
-        runner.fail("stop 后不应收到响应");
-      } catch (error) {
-        runner.assert(
-          String(error?.message ?? error).includes("已停止") ||
-            String(error?.message ?? error).includes("cancelled"),
-          `stop 后正确 reject → "${error?.message ?? error}"`,
-        );
-      }
+      const stopResult = await expectRejected(
+        () => requestPromise,
+        ["已停止", "cancelled"],
+      );
+
+      runner.assert(stopResult.rejected, "stop 后请求应 reject");
+      runner.assert(
+        stopResult.matched,
+        `stop 后正确 reject → "${stopResult.message}"`,
+      );
     } finally {
       await safeStop(slave, master);
     }
@@ -330,16 +325,15 @@ export async function runLifecycleAndPendingTests(runner) {
     const pending = new PendingManager(1);
     pending.create("k1", 10, "r1");
 
-    let error = null;
-    try {
-      pending.ensureCapacity();
-    } catch (thrown) {
-      error = thrown;
-    }
+    const overLimitResult = await expectRejected(
+      () => pending.ensureCapacity(),
+      ["并发请求数已达上限"],
+    );
 
+    runner.assert(overLimitResult.rejected, "ensureCapacity 超限应抛错");
     runner.assert(
-      String(error?.message ?? error).includes("并发请求数已达上限"),
-      `超限时正确抛错 → "${error?.message ?? error}"`,
+      overLimitResult.matched,
+      `超限时正确抛错 → "${overLimitResult.message}"`,
     );
   });
 
@@ -371,17 +365,13 @@ export async function runLifecycleAndPendingTests(runner) {
       startTimer();
       const rejected = pending.reject("k1", new Error("fail"));
 
-      let error = null;
-      try {
-        await promise;
-      } catch (thrown) {
-        error = thrown;
-      }
+      const rejectResult = await expectRejected(() => promise, ["fail"]);
 
       runner.assert(rejected === true, "reject 返回 true");
+      runner.assert(rejectResult.rejected, "reject 后 promise 应拒绝");
       runner.assert(
-        String(error?.message ?? error).includes("fail"),
-        `reject 结果正确 → "${error?.message ?? error}"`,
+        rejectResult.matched,
+        `reject 结果正确 → "${rejectResult.message}"`,
       );
       runner.assert(
         pending.size === 0,
@@ -396,16 +386,12 @@ export async function runLifecycleAndPendingTests(runner) {
 
     startTimer();
 
-    let error = null;
-    try {
-      await promise;
-    } catch (thrown) {
-      error = thrown;
-    }
+    const timeoutResult = await expectRejected(() => promise, ["请求超时"]);
 
+    runner.assert(timeoutResult.rejected, "超时后 promise 应拒绝");
     runner.assert(
-      String(error?.message ?? error).includes("请求超时"),
-      `超时自动 reject → "${error?.message ?? error}"`,
+      timeoutResult.matched,
+      `超时自动 reject → "${timeoutResult.message}"`,
     );
     runner.assert(pending.size === 0, `超时后 size 清零 → ${pending.size}`);
   });
@@ -422,28 +408,16 @@ export async function runLifecycleAndPendingTests(runner) {
 
       pending.rejectAll(new Error("stop"));
 
-      let e1 = null;
-      let e2 = null;
-
-      try {
-        await p1.promise;
-      } catch (thrown) {
-        e1 = thrown;
-      }
-
-      try {
-        await p2.promise;
-      } catch (thrown) {
-        e2 = thrown;
-      }
+      const p1Result = await expectRejected(() => p1.promise, ["stop"]);
+      const p2Result = await expectRejected(() => p2.promise, ["stop"]);
 
       runner.assert(
-        String(e1?.message ?? e1).includes("stop"),
-        `第一个 pending 被取消 → "${e1?.message ?? e1}"`,
+        p1Result.rejected && p1Result.matched,
+        `第一个 pending 被取消 → "${p1Result.message}"`,
       );
       runner.assert(
-        String(e2?.message ?? e2).includes("stop"),
-        `第二个 pending 被取消 → "${e2?.message ?? e2}"`,
+        p2Result.rejected && p2Result.matched,
+        `第二个 pending 被取消 → "${p2Result.message}"`,
       );
       runner.assert(
         pending.size === 0,

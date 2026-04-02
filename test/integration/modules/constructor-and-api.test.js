@@ -1,91 +1,66 @@
 import { ZNL } from "../../../index.js";
 import { PendingManager } from "../../../src/PendingManager.js";
 import { installTimeoutScaling } from "../helpers/common.js";
+import { expectRejected } from "../helpers/assertions.js";
 
 installTimeoutScaling();
+
+function assertRejectedWith(runner, result, expectedText, title) {
+  runner.assert(result.rejected, `${title}：应抛错`);
+  runner.assert(
+    result.matched,
+    `${title}：错误信息包含 "${expectedText}" → "${result.message}"`,
+  );
+}
 
 export async function runConstructorAndApiTests(runner) {
   runner.section("构造参数校验 & API 角色限制");
 
   await runner.test("role 非法应抛错", async () => {
-    let threw = false;
-
-    try {
-      new ZNL({ role: "bad-role", id: "x" });
-    } catch (error) {
-      threw = true;
-      runner.assert(
-        String(error?.message ?? error).includes("role"),
-        `错误信息包含 role → "${error?.message ?? error}"`,
-      );
-    }
-
-    if (!threw) {
-      runner.fail("未抛错（role 非法）");
-    }
+    const result = await expectRejected(
+      () => new ZNL({ role: "bad-role", id: "x" }),
+      ["role"],
+    );
+    assertRejectedWith(runner, result, "role", "role 非法");
   });
 
   await runner.test("id 缺失应抛错", async () => {
-    let threw = false;
-
-    try {
-      new ZNL({ role: "master" });
-    } catch (error) {
-      threw = true;
-      runner.assert(
-        String(error?.message ?? error).includes("id"),
-        `错误信息包含 id → "${error?.message ?? error}"`,
-      );
-    }
-
-    if (!threw) {
-      runner.fail("未抛错（id 缺失）");
-    }
+    const result = await expectRejected(
+      () => new ZNL({ role: "master" }),
+      ["id"],
+    );
+    assertRejectedWith(runner, result, "id", "id 缺失");
   });
 
   await runner.test(
     "encrypted=true 但未提供 authKey/authKeyMap 应抛错",
     async () => {
-      let threw = false;
+      const result = await expectRejected(
+        () => new ZNL({ role: "master", id: "m-enc", encrypted: true }),
+        ["authKey", "authKeyMap"],
+      );
 
-      try {
-        new ZNL({ role: "master", id: "m-enc", encrypted: true });
-      } catch (error) {
-        threw = true;
-        const message = String(error?.message ?? error);
-        runner.assert(
-          message.includes("authKey") || message.includes("authKeyMap"),
-          `错误信息包含 authKey/authKeyMap → "${message}"`,
-        );
-      }
-
-      if (!threw) {
-        runner.fail("未抛错（encrypted=true 缺少 authKey/authKeyMap）");
-      }
+      runner.assert(result.rejected, "缺少 authKey/authKeyMap 应抛错");
+      runner.assert(
+        result.matched,
+        `错误信息包含 authKey/authKeyMap → "${result.message}"`,
+      );
     },
   );
 
   await runner.test("master 侧传入非法 authKeyMap 类型应抛错", async () => {
-    let threw = false;
+    const result = await expectRejected(
+      () =>
+        new ZNL({
+          role: "master",
+          id: "m-bad-auth-map",
+          encrypted: true,
+          authKeyMap: "bad-auth-map",
+        }),
+      ["authKeyMap"],
+    );
 
-    try {
-      new ZNL({
-        role: "master",
-        id: "m-bad-auth-map",
-        encrypted: true,
-        authKeyMap: "bad-auth-map",
-      });
-    } catch (error) {
-      threw = true;
-      runner.assert(
-        String(error?.message ?? error).includes("authKeyMap"),
-        `错误信息包含 authKeyMap → "${error?.message ?? error}"`,
-      );
-    }
-
-    if (!threw) {
-      runner.fail("未抛错（非法 authKeyMap 类型）");
-    }
+    assertRejectedWith(runner, result, "authKeyMap", "非法 authKeyMap 类型");
   });
 
   await runner.test(
@@ -135,18 +110,12 @@ export async function runConstructorAndApiTests(runner) {
       endpoints: { router: "tcp://127.0.0.1:16103" },
     });
 
-    let error = null;
-
-    try {
-      slave.PUBLISH("news", "hello");
-    } catch (thrown) {
-      error = thrown;
-    }
-
-    runner.assert(
-      String(error?.message ?? error).includes("master"),
-      `错误信息包含 master → "${error?.message ?? error}"`,
+    const result = await expectRejected(
+      () => slave.PUBLISH("news", "hello"),
+      ["master"],
     );
+
+    assertRejectedWith(runner, result, "master", "PUBLISH 角色限制");
   });
 
   await runner.test("SUBSCRIBE() 只能在 slave 侧调用", async () => {
@@ -156,18 +125,12 @@ export async function runConstructorAndApiTests(runner) {
       endpoints: { router: "tcp://127.0.0.1:16104" },
     });
 
-    let error = null;
-
-    try {
-      master.SUBSCRIBE("news", () => {});
-    } catch (thrown) {
-      error = thrown;
-    }
-
-    runner.assert(
-      String(error?.message ?? error).includes("slave"),
-      `错误信息包含 slave → "${error?.message ?? error}"`,
+    const result = await expectRejected(
+      () => master.SUBSCRIBE("news", () => {}),
+      ["slave"],
     );
+
+    assertRejectedWith(runner, result, "slave", "SUBSCRIBE 角色限制");
   });
 
   await runner.test("UNSUBSCRIBE() 只能在 slave 侧调用", async () => {
@@ -177,18 +140,12 @@ export async function runConstructorAndApiTests(runner) {
       endpoints: { router: "tcp://127.0.0.1:16105" },
     });
 
-    let error = null;
-
-    try {
-      master.UNSUBSCRIBE("news");
-    } catch (thrown) {
-      error = thrown;
-    }
-
-    runner.assert(
-      String(error?.message ?? error).includes("slave"),
-      `错误信息包含 slave → "${error?.message ?? error}"`,
+    const result = await expectRejected(
+      () => master.UNSUBSCRIBE("news"),
+      ["slave"],
     );
+
+    assertRejectedWith(runner, result, "slave", "UNSUBSCRIBE 角色限制");
   });
 
   await runner.test("PUSH() 只能在 slave 侧调用", async () => {
@@ -198,18 +155,12 @@ export async function runConstructorAndApiTests(runner) {
       endpoints: { router: "tcp://127.0.0.1:16106" },
     });
 
-    let error = null;
-
-    try {
-      master.PUSH("metrics", "cpu=1");
-    } catch (thrown) {
-      error = thrown;
-    }
-
-    runner.assert(
-      String(error?.message ?? error).includes("slave"),
-      `错误信息包含 slave → "${error?.message ?? error}"`,
+    const result = await expectRejected(
+      () => master.PUSH("metrics", "cpu=1"),
+      ["slave"],
     );
+
+    assertRejectedWith(runner, result, "slave", "PUSH 角色限制");
   });
 
   await runner.test("addAuthKey() 只能在 master 侧调用", async () => {
@@ -219,18 +170,12 @@ export async function runConstructorAndApiTests(runner) {
       endpoints: { router: "tcp://127.0.0.1:16107" },
     });
 
-    let error = null;
-
-    try {
-      slave.addAuthKey("s1", "key-1");
-    } catch (thrown) {
-      error = thrown;
-    }
-
-    runner.assert(
-      String(error?.message ?? error).includes("master"),
-      `错误信息包含 master → "${error?.message ?? error}"`,
+    const result = await expectRejected(
+      () => slave.addAuthKey("s1", "key-1"),
+      ["master"],
     );
+
+    assertRejectedWith(runner, result, "master", "addAuthKey 角色限制");
   });
 
   await runner.test("removeAuthKey() 只能在 master 侧调用", async () => {
@@ -240,18 +185,12 @@ export async function runConstructorAndApiTests(runner) {
       endpoints: { router: "tcp://127.0.0.1:16108" },
     });
 
-    let error = null;
-
-    try {
-      slave.removeAuthKey("s1");
-    } catch (thrown) {
-      error = thrown;
-    }
-
-    runner.assert(
-      String(error?.message ?? error).includes("master"),
-      `错误信息包含 master → "${error?.message ?? error}"`,
+    const result = await expectRejected(
+      () => slave.removeAuthKey("s1"),
+      ["master"],
     );
+
+    assertRejectedWith(runner, result, "master", "removeAuthKey 角色限制");
   });
 
   await runner.test("PendingManager key 含 identity 避免碰撞", async () => {

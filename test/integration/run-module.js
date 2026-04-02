@@ -1,49 +1,15 @@
 import { TestRunner } from "./runner.js";
-import { VERBOSE } from "./helpers/common.js";
-
-import { runConstructorAndApiTests } from "./modules/constructor-and-api.test.js";
-import { runRpcAndPayloadTests } from "./modules/rpc-and-payload.test.js";
-import { runLifecycleAndPendingTests } from "./modules/lifecycle-and-pending.test.js";
-import { runPubsubAndHeartbeatTests } from "./modules/pubsub-and-heartbeat.test.js";
-import { runSecurityTests } from "./modules/security.test.js";
-import { runFsServiceTests } from "./modules/fs-service.test.js";
-
-const modules = new Map([
-  ["constructor", runConstructorAndApiTests],
-  ["api", runConstructorAndApiTests],
-  ["rpc", runRpcAndPayloadTests],
-  ["payload", runRpcAndPayloadTests],
-  ["lifecycle", runLifecycleAndPendingTests],
-  ["pending", runLifecycleAndPendingTests],
-  ["pubsub", runPubsubAndHeartbeatTests],
-  ["heartbeat", runPubsubAndHeartbeatTests],
-  ["security", runSecurityTests],
-  ["fs", runFsServiceTests],
-]);
-
-const canonicalModuleNames = [
-  "constructor",
-  "rpc",
-  "lifecycle",
-  "pubsub",
-  "security",
-  "fs",
-];
-
-const aliasHints = [
-  ["api", "constructor"],
-  ["payload", "rpc"],
-  ["pending", "lifecycle"],
-  ["heartbeat", "pubsub"],
-];
-
-const isIgnorableStopCancelError = (error) => {
-  const message = String(error?.message ?? error ?? "");
-  return (
-    message.includes("节点已停止，所有待处理请求已取消") ||
-    message.includes("已停止，所有待处理请求已取消")
-  );
-};
+import { TEST_CONFIG, VERBOSE } from "./helpers/common.js";
+import {
+  handleFatalError,
+  installGlobalFatalHandlers,
+} from "./helpers/errors.js";
+import {
+  aliasHints,
+  canonicalModuleNames,
+  modules,
+  resolveCanonicalModuleName,
+} from "./modules/index.js";
 
 const normalizeReporter = (value) => {
   const text = String(value ?? "")
@@ -124,30 +90,9 @@ function printUsage() {
   console.log("  ZNL_TEST_REPORTER=human|json");
 }
 
-let globalErrorHandlingInstalled = false;
-
-function installGlobalErrorHandling() {
-  if (globalErrorHandlingInstalled) return;
-  globalErrorHandlingInstalled = true;
-
-  const handleFatal = (source, error) => {
-    if (isIgnorableStopCancelError(error)) return;
-    const detail = error?.stack ?? error?.message ?? String(error);
-    console.error(`\n[run-module] ${source}:\n${detail}`);
-    process.exitCode = 1;
-  };
-
-  process.on("unhandledRejection", (reason) => {
-    handleFatal("unhandledRejection", reason);
-  });
-
-  process.on("uncaughtException", (error) => {
-    handleFatal("uncaughtException", error);
-  });
-}
-
 async function runSingleModule({ moduleInput, reporter }) {
-  const runModule = modules.get(moduleInput);
+  const canonicalName = resolveCanonicalModuleName(moduleInput);
+  const runModule = modules.get(moduleInput) || modules.get(canonicalName);
 
   if (!runModule) {
     console.error(`未知集成测试模块: ${moduleInput || "(empty)"}`);
@@ -158,12 +103,17 @@ async function runSingleModule({ moduleInput, reporter }) {
   }
 
   const runner = new TestRunner({
-    verbose: VERBOSE,
+    verbose: VERBOSE || TEST_CONFIG.verbose,
     reporter,
     exitOnComplete: false,
   });
 
-  runner.banner(`ZNL 集成测试（模块: ${moduleInput}）`);
+  const displayName =
+    canonicalName && canonicalName !== moduleInput
+      ? `${moduleInput} -> ${canonicalName}`
+      : moduleInput;
+
+  runner.banner(`ZNL 集成测试（模块: ${displayName}）`);
   await runModule(runner);
 
   const report = runner.summary({ format: reporter, exitProcess: false });
@@ -173,7 +123,7 @@ async function runSingleModule({ moduleInput, reporter }) {
 }
 
 async function main() {
-  installGlobalErrorHandling();
+  installGlobalFatalHandlers({ source: "run-module" });
 
   const { moduleInput, reporter, help } = parseCli();
 
@@ -186,14 +136,9 @@ async function main() {
   try {
     await runSingleModule({ moduleInput, reporter });
   } catch (error) {
-    if (isIgnorableStopCancelError(error)) {
+    if (!handleFatalError(error, { source: "run-module" })) {
       process.exitCode = 0;
-      return;
     }
-
-    const detail = error?.stack ?? error?.message ?? String(error);
-    console.error(`\n[run-module] fatal:\n${detail}`);
-    process.exitCode = 1;
   }
 }
 

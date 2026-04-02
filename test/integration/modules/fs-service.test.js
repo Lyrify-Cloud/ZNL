@@ -11,7 +11,7 @@ import {
   safeStop,
   scaleMs,
   toText,
-  waitForSlave,
+  waitForRegistered,
 } from "../helpers/common.js";
 
 installTimeoutScaling();
@@ -102,7 +102,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(250);
 
-        const registered = await waitForSlave(master, "s-fs", 3000);
+        const registered = await waitForRegistered(master, "s-fs", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(registered, `fs slave 已注册 → ${master.slaves}`);
 
         const list1 = await master.fs.list("s-fs", ".", {
@@ -489,7 +492,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(250);
 
-        const registered = await waitForSlave(master, "s-fs-symlink", 3000);
+        const registered = await waitForRegistered(master, "s-fs-symlink", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(
           registered,
           `symlink 测试 slave 已注册 → ${master.slaves}`,
@@ -581,7 +587,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(250);
 
-        const registered = await waitForSlave(master, "s-fs-policy-ro", 3000);
+        const registered = await waitForRegistered(master, "s-fs-policy-ro", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(
           registered,
           `readOnly 测试 slave 已注册 → ${master.slaves}`,
@@ -745,7 +754,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(250);
 
-        const registered = await waitForSlave(master, "s-fs-policy", 3000);
+        const registered = await waitForRegistered(master, "s-fs-policy", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(
           registered,
           `policy 测试 slave 已注册 → ${master.slaves}`,
@@ -918,7 +930,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(300);
 
-        const registered = await waitForSlave(master, "s-fs-enc", 3000);
+        const registered = await waitForRegistered(master, "s-fs-enc", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(
           registered,
           `encrypted fs slave 已注册 → ${master.slaves}`,
@@ -1011,7 +1026,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(300);
 
-        const registered = await waitForSlave(master, "s-fs-mixed", 3000);
+        const registered = await waitForRegistered(master, "s-fs-mixed", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(
           registered,
           `mixed plain slave 已注册 → ${master.slaves}`,
@@ -1174,7 +1192,10 @@ export async function runFsServiceTests(runner) {
         await slave.start();
         await delay(350);
 
-        const registered = await waitForSlave(master, "s-fs-mixed-enc", 3000);
+        const registered = await waitForRegistered(master, "s-fs-mixed-enc", {
+          timeoutMs: 3000,
+          intervalMs: 100,
+        });
         runner.assert(
           registered,
           `mixed encrypted slave 已注册 → ${master.slaves}`,

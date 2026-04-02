@@ -1,11 +1,49 @@
 import fs from "node:fs/promises";
 import { ZNL } from "../../../index.js";
-import { deriveKeys, digestFrames, encodeAuthProofToken, encryptFrames, toFrameBuffers } from "../../../src/security.js";
+import {
+  deriveKeys,
+  digestFrames,
+  encodeAuthProofToken,
+  encryptFrames,
+  toFrameBuffers,
+} from "../../../src/security.js";
 import { SECURITY_ENVELOPE_VERSION } from "../../../src/constants.js";
 import { buildRequestFrames } from "../../../src/protocol.js";
 
-export const TIMEOUT_SCALE = /^(1|true|yes)$/i.test(process.env.CI ?? "") ? 2 : 1;
-export const VERBOSE = /^(1|true|yes)$/i.test(process.env.ZNL_TEST_VERBOSE ?? "");
+const TRUE_RE = /^(1|true|yes|on)$/i;
+
+const envBool = (name, fallback = false) => {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return Boolean(fallback);
+  return TRUE_RE.test(String(raw).trim());
+};
+
+const envNumber = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return Number(fallback);
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : Number(fallback);
+};
+
+export const TIMEOUT_SCALE = Math.max(
+  0.1,
+  envNumber("ZNL_TEST_TIMEOUT_SCALE", envBool("CI", false) ? 2 : 1),
+);
+
+export const VERBOSE = envBool("ZNL_TEST_VERBOSE", false);
+
+export const TEST_CONFIG = Object.freeze({
+  timeoutScale: TIMEOUT_SCALE,
+  verbose: VERBOSE,
+  wait: Object.freeze({
+    defaultTimeoutMs: envNumber("ZNL_TEST_WAIT_TIMEOUT_MS", 2000),
+    defaultIntervalMs: envNumber("ZNL_TEST_WAIT_INTERVAL_MS", 50),
+    registerTimeoutMs: envNumber("ZNL_TEST_REGISTER_TIMEOUT_MS", 3000),
+    startupDelayMs: envNumber("ZNL_TEST_STARTUP_DELAY_MS", 200),
+    onlineTimeoutMs: envNumber("ZNL_TEST_ONLINE_TIMEOUT_MS", 2000),
+    offlineTimeoutMs: envNumber("ZNL_TEST_OFFLINE_TIMEOUT_MS", 2500),
+  }),
+});
 
 export const toText = (value) =>
   Buffer.isBuffer(value) ? value.toString("utf8") : String(value);
@@ -51,11 +89,19 @@ export function installTimeoutScaling() {
     if (typeof payloadOrHandler === "function") {
       return originalDealer.call(this, payloadOrHandler);
     }
-    return originalDealer.call(this, payloadOrHandler, wrapTimeoutOptions(options));
+    return originalDealer.call(
+      this,
+      payloadOrHandler,
+      wrapTimeoutOptions(options),
+    );
   };
 
   const originalRouter = ZNL.prototype.ROUTER;
-  ZNL.prototype.ROUTER = async function (identityOrHandler, payload, options = {}) {
+  ZNL.prototype.ROUTER = async function (
+    identityOrHandler,
+    payload,
+    options = {},
+  ) {
     if (typeof identityOrHandler === "function") {
       return originalRouter.call(this, identityOrHandler);
     }
@@ -86,29 +132,88 @@ export function attachLogger(node, label, state = { silent: false }) {
   return state;
 }
 
-export async function waitForSlave(master, slaveId, maxMs = 2000) {
-  const deadline = Date.now() + scaleMs(maxMs);
-  while (Date.now() < deadline) {
-    if (master.slaves.includes(slaveId)) return true;
-    await delay(100);
-  }
-  return false;
-}
-
-export async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 50 } = {}) {
+export async function waitFor(
+  predicate,
+  {
+    timeoutMs = TEST_CONFIG.wait.defaultTimeoutMs,
+    intervalMs = TEST_CONFIG.wait.defaultIntervalMs,
+  } = {},
+) {
   const deadline = Date.now() + scaleMs(timeoutMs);
+
   while (Date.now() < deadline) {
     if (await predicate()) return true;
     await delay(intervalMs);
   }
+
   return false;
+}
+
+export async function waitForRegistered(
+  master,
+  slaveId,
+  { timeoutMs = TEST_CONFIG.wait.registerTimeoutMs, intervalMs = 100 } = {},
+) {
+  return waitFor(() => master?.slaves?.includes(slaveId), {
+    timeoutMs,
+    intervalMs,
+  });
+}
+
+export async function waitForOnline(
+  slave,
+  { timeoutMs = TEST_CONFIG.wait.onlineTimeoutMs, intervalMs = 100 } = {},
+) {
+  return waitFor(
+    () => Boolean(slave?.masterOnline) && Boolean(slave?.isMasterOnline?.()),
+    { timeoutMs, intervalMs },
+  );
+}
+
+export async function waitForOffline(
+  slave,
+  { timeoutMs = TEST_CONFIG.wait.offlineTimeoutMs, intervalMs = 100 } = {},
+) {
+  return waitFor(
+    () => !slave?.masterOnline && !Boolean(slave?.isMasterOnline?.()),
+    { timeoutMs, intervalMs },
+  );
+}
+
+export async function waitForCount(
+  getCount,
+  expected,
+  {
+    timeoutMs = TEST_CONFIG.wait.defaultTimeoutMs,
+    intervalMs = TEST_CONFIG.wait.defaultIntervalMs,
+    compare = (count, exp) => count >= exp,
+  } = {},
+) {
+  return waitFor(async () => compare(await getCount(), expected), {
+    timeoutMs,
+    intervalMs,
+  });
+}
+
+/**
+ * @deprecated 请改用 waitForRegistered(master, slaveId, { timeoutMs, intervalMs }).
+ * Backward-compatible alias:
+ * waitForSlave(master, slaveId, maxMs)
+ */
+export async function waitForSlave(master, slaveId, maxMs = 2000) {
+  return waitForRegistered(master, slaveId, {
+    timeoutMs: maxMs,
+    intervalMs: 100,
+  });
 }
 
 export async function safeStop(...nodes) {
   for (const node of nodes.filter(Boolean).reverse()) {
     try {
       await node.stop();
-    } catch {}
+    } catch {
+      // keep teardown best-effort for compatibility
+    }
   }
 }
 

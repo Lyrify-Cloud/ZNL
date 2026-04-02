@@ -1,28 +1,10 @@
 import { TestRunner } from "./runner.js";
-import { VERBOSE } from "./helpers/common.js";
-import { runConstructorAndApiTests } from "./modules/constructor-and-api.test.js";
-import { runRpcAndPayloadTests } from "./modules/rpc-and-payload.test.js";
-import { runLifecycleAndPendingTests } from "./modules/lifecycle-and-pending.test.js";
-import { runPubsubAndHeartbeatTests } from "./modules/pubsub-and-heartbeat.test.js";
-import { runSecurityTests } from "./modules/security.test.js";
-import { runFsServiceTests } from "./modules/fs-service.test.js";
-
-const moduleRunners = [
-  ["constructor", runConstructorAndApiTests],
-  ["rpc", runRpcAndPayloadTests],
-  ["lifecycle", runLifecycleAndPendingTests],
-  ["pubsub", runPubsubAndHeartbeatTests],
-  ["security", runSecurityTests],
-  ["fs", runFsServiceTests],
-];
-
-const isIgnorableStopCancelError = (error) => {
-  const message = String(error?.message ?? error ?? "");
-  return (
-    message.includes("节点已停止，所有待处理请求已取消") ||
-    message.includes("已停止，所有待处理请求已取消")
-  );
-};
+import { TEST_CONFIG, VERBOSE } from "./helpers/common.js";
+import {
+  handleFatalError,
+  installGlobalFatalHandlers,
+} from "./helpers/errors.js";
+import { moduleRunners, canonicalModuleNames } from "./modules/index.js";
 
 const normalizeReporter = (value) => {
   const text = String(value ?? "")
@@ -49,27 +31,42 @@ function resolveReporter(argv = process.argv.slice(2)) {
   return normalizeReporter(process.env.ZNL_TEST_REPORTER);
 }
 
-let globalErrorHandlingInstalled = false;
+function normalizeModuleEntries(registry) {
+  if (registry instanceof Map) {
+    return Array.from(registry.entries()).map(([name, run]) => ({ name, run }));
+  }
 
-function installGlobalErrorHandling() {
-  if (globalErrorHandlingInstalled) return;
-  globalErrorHandlingInstalled = true;
+  if (Array.isArray(registry)) {
+    return registry
+      .map((item) => {
+        if (Array.isArray(item)) {
+          const [name, run] = item;
+          return { name, run };
+        }
 
-  const handleFatal = (source, error) => {
-    if (isIgnorableStopCancelError(error)) return;
+        if (item && typeof item === "object") {
+          const name = item.name ?? item.id ?? item.key;
+          const run = item.run ?? item.execute ?? item.fn;
+          return { name, run };
+        }
 
-    const detail = error?.stack ?? error?.message ?? String(error);
-    console.error(`\n[integration] ${source}:\n${detail}`);
-    process.exitCode = 1;
-  };
+        return null;
+      })
+      .filter(
+        (entry) =>
+          entry &&
+          typeof entry.name === "string" &&
+          typeof entry.run === "function",
+      );
+  }
 
-  process.on("unhandledRejection", (reason) => {
-    handleFatal("unhandledRejection", reason);
-  });
+  if (registry && typeof registry === "object") {
+    return Object.entries(registry)
+      .map(([name, run]) => ({ name, run }))
+      .filter((entry) => typeof entry.run === "function");
+  }
 
-  process.on("uncaughtException", (error) => {
-    handleFatal("uncaughtException", error);
-  });
+  return [];
 }
 
 export async function runIntegrationTests({
@@ -77,22 +74,32 @@ export async function runIntegrationTests({
 } = {}) {
   const selectedReporter = normalizeReporter(reporter);
   const runner = new TestRunner({
-    verbose: VERBOSE,
+    verbose: VERBOSE || TEST_CONFIG.verbose,
     reporter: selectedReporter,
     exitOnComplete: false,
   });
 
-  runner.banner("ZNL 集成测试（模块化版）");
+  const entries = normalizeModuleEntries(moduleRunners);
+  if (entries.length === 0) {
+    throw new Error("模块注册表为空：请检查 test/integration/modules/index.js");
+  }
 
-  for (const [, runModule] of moduleRunners) {
-    await runModule(runner);
+  const moduleHint =
+    Array.isArray(canonicalModuleNames) && canonicalModuleNames.length > 0
+      ? ` [${canonicalModuleNames.join(", ")}]`
+      : "";
+
+  runner.banner(`ZNL 集成测试（模块化版）${moduleHint}`);
+
+  for (const entry of entries) {
+    await entry.run(runner);
   }
 
   return runner.summary({ format: selectedReporter, exitProcess: false });
 }
 
 async function main() {
-  installGlobalErrorHandling();
+  installGlobalFatalHandlers({ source: "integration" });
 
   try {
     const report = await runIntegrationTests();
@@ -100,14 +107,9 @@ async function main() {
       report?.totals?.testsFailed > 0 || report?.totals?.assertionsFailed > 0;
     process.exitCode = hasFailure ? 1 : 0;
   } catch (error) {
-    if (isIgnorableStopCancelError(error)) {
+    if (!handleFatalError(error, { source: "integration" })) {
       process.exitCode = 0;
-      return;
     }
-
-    const detail = error?.stack ?? error?.message ?? String(error);
-    console.error(`\n[integration] fatal:\n${detail}`);
-    process.exitCode = 1;
   }
 }
 

@@ -1,16 +1,15 @@
 import * as zmq from "zeromq";
 import { ZNL } from "../../../index.js";
-import {
-  CONTROL_PREFIX,
-  CONTROL_REGISTER,
-} from "../../../src/constants.js";
+import { CONTROL_PREFIX, CONTROL_REGISTER } from "../../../src/constants.js";
 import {
   delay,
   installTimeoutScaling,
   safeStop,
   scaleMs,
   toText,
-  waitFor,
+  waitForOnline,
+  waitForOffline,
+  waitForRegistered,
 } from "../helpers/common.js";
 
 installTimeoutScaling();
@@ -93,7 +92,9 @@ export async function runPubsubAndHeartbeatTests(runner) {
       const slaveALog = [];
       const slaveBLog = [];
 
-      slaveA.SUBSCRIBE("chat", ({ payload }) => slaveALog.push(toText(payload)));
+      slaveA.SUBSCRIBE("chat", ({ payload }) =>
+        slaveALog.push(toText(payload)),
+      );
       slaveB.on("publish", ({ topic, payload }) => {
         slaveBLog.push(`${topic}:${toText(payload)}`);
       });
@@ -255,7 +256,10 @@ export async function runPubsubAndHeartbeatTests(runner) {
       slave.PUSH("metrics", "cpu=0.42");
       await delay(120);
 
-      runner.assert(received.length === 1, `收到 1 条 push → ${received.length}`);
+      runner.assert(
+        received.length === 1,
+        `收到 1 条 push → ${received.length}`,
+      );
       runner.assert(
         received[0]?.identityText === "s-push",
         `identity 匹配 → "${received[0]?.identityText}"`,
@@ -273,48 +277,54 @@ export async function runPubsubAndHeartbeatTests(runner) {
     }
   });
 
-  await runner.test("publish 事件不会被误当作业务 request/response 事件", async () => {
-    const EP_PUB_EVT = "tcp://127.0.0.1:16043";
-    const master = new ZNL({
-      role: "master",
-      id: "m-pub-evt",
-      endpoints: { router: EP_PUB_EVT },
-    });
-    const slave = new ZNL({
-      role: "slave",
-      id: "s-pub-evt",
-      endpoints: { router: EP_PUB_EVT },
-    });
+  await runner.test(
+    "publish 事件不会被误当作业务 request/response 事件",
+    async () => {
+      const EP_PUB_EVT = "tcp://127.0.0.1:16043";
+      const master = new ZNL({
+        role: "master",
+        id: "m-pub-evt",
+        endpoints: { router: EP_PUB_EVT },
+      });
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-pub-evt",
+        endpoints: { router: EP_PUB_EVT },
+      });
 
-    let publishCount = 0;
-    let requestCount = 0;
-    let responseCount = 0;
+      let publishCount = 0;
+      let requestCount = 0;
+      let responseCount = 0;
 
-    slave.SUBSCRIBE("audit", () => {
-      publishCount++;
-    });
-    slave.on("request", () => {
-      requestCount++;
-    });
-    slave.on("response", () => {
-      responseCount++;
-    });
+      slave.SUBSCRIBE("audit", () => {
+        publishCount++;
+      });
+      slave.on("request", () => {
+        requestCount++;
+      });
+      slave.on("response", () => {
+        responseCount++;
+      });
 
-    await master.start();
-    await slave.start();
-    await delay(200);
+      await master.start();
+      await slave.start();
+      await delay(200);
 
-    try {
-      master.PUBLISH("audit", "evt-1");
-      await delay(120);
+      try {
+        master.PUBLISH("audit", "evt-1");
+        await delay(120);
 
-      runner.assert(publishCount === 1, `publish 正常触发 → ${publishCount}`);
-      runner.assert(requestCount === 0, `不应触发 request → ${requestCount}`);
-      runner.assert(responseCount === 0, `不应触发 response → ${responseCount}`);
-    } finally {
-      await safeStop(slave, master);
-    }
-  });
+        runner.assert(publishCount === 1, `publish 正常触发 → ${publishCount}`);
+        runner.assert(requestCount === 0, `不应触发 request → ${requestCount}`);
+        runner.assert(
+          responseCount === 0,
+          `不应触发 response → ${responseCount}`,
+        );
+      } finally {
+        await safeStop(slave, master);
+      }
+    },
+  );
 
   await runner.test("master 重启后 slave 自动补注册并恢复广播", async () => {
     const EP_RESTART = "tcp://127.0.0.1:16011";
@@ -339,7 +349,10 @@ export async function runPubsubAndHeartbeatTests(runner) {
     await slave.start();
     await delay(200);
 
-    runner.assert(master1.slaves.includes("s9"), `首次注册成功 → ${master1.slaves}`);
+    runner.assert(
+      master1.slaves.includes("s9"),
+      `首次注册成功 → ${master1.slaves}`,
+    );
 
     await master1.stop();
     await delay(300);
@@ -354,10 +367,10 @@ export async function runPubsubAndHeartbeatTests(runner) {
     await master2.start();
 
     try {
-      const registered = await waitFor(
-        () => master2.slaves.includes("s9"),
-        { timeoutMs: 2000, intervalMs: 100 },
-      );
+      const registered = await waitForRegistered(master2, "s9", {
+        timeoutMs: 2000,
+        intervalMs: 100,
+      });
       runner.assert(registered, `重启后自动补注册成功 → ${master2.slaves}`);
 
       master2.PUBLISH("news", "after-restart");
@@ -405,10 +418,10 @@ export async function runPubsubAndHeartbeatTests(runner) {
       await slave.start();
 
       try {
-        const becameOnline = await waitFor(
-          () => slave.masterOnline && slave.isMasterOnline(),
-          { timeoutMs: 2000, intervalMs: 100 },
-        );
+        const becameOnline = await waitForOnline(slave, {
+          timeoutMs: 2000,
+          intervalMs: 100,
+        });
 
         runner.assert(becameOnline, "收到 heartbeat_ack 后主节点状态变为在线");
         runner.assert(slave.masterOnline === true, "masterOnline 属性为 true");
@@ -419,10 +432,10 @@ export async function runPubsubAndHeartbeatTests(runner) {
 
         await master.stop();
 
-        const becameOffline = await waitFor(
-          () => !slave.masterOnline && !slave.isMasterOnline(),
-          { timeoutMs: 2500, intervalMs: 100 },
-        );
+        const becameOffline = await waitForOffline(slave, {
+          timeoutMs: 2500,
+          intervalMs: 100,
+        });
 
         runner.assert(becameOffline, "心跳应答超时后主节点状态变为离线");
         runner.assert(
@@ -463,7 +476,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
       await master1.start();
       await slave.start();
 
-      const online1 = await waitFor(() => slave.masterOnline, {
+      const online1 = await waitForOnline(slave, {
         timeoutMs: 2000,
         intervalMs: 100,
       });
@@ -479,7 +492,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
 
       await master1.stop();
 
-      const offline = await waitFor(() => !slave.masterOnline, {
+      const offline = await waitForOffline(slave, {
         timeoutMs: 2500,
         intervalMs: 100,
       });
@@ -497,10 +510,15 @@ export async function runPubsubAndHeartbeatTests(runner) {
       await master2.start();
 
       try {
-        const reOnline = await waitFor(
-          () => slave.masterOnline && master2.slaves.includes("s-ack"),
-          { timeoutMs: 3000, intervalMs: 100 },
-        );
+        const reOnline =
+          (await waitForOnline(slave, {
+            timeoutMs: 3000,
+            intervalMs: 100,
+          })) &&
+          (await waitForRegistered(master2, "s-ack", {
+            timeoutMs: 3000,
+            intervalMs: 100,
+          }));
 
         runner.assert(reOnline, `重启后重新在线成功 → ${master2.slaves}`);
         runner.assert(
@@ -545,10 +563,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
       );
 
       await delay(1200);
-      runner.assert(
-        master.slaves.includes("hb0-slave"),
-        "心跳禁用后未被移除",
-      );
+      runner.assert(master.slaves.includes("hb0-slave"), "心跳禁用后未被移除");
     } finally {
       dealer.close();
       await safeStop(master);
