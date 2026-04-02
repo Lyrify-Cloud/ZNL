@@ -25,6 +25,8 @@
  *   fs ls [dir]
  *   fs stat <path>
  *   fs cat <file>
+ *   fs create <path>
+ *   fs mkdir <path>
  *   fs rm <path>
  *   fs mv <from> <to>
  *   fs upload <localPath> <remotePath>
@@ -275,6 +277,8 @@ function printHelp() {
         "fs ls [dir]",
         "fs stat <path>",
         "fs cat <file>",
+        "fs create <path>",
+        "fs mkdir <path>",
         "fs rm <path>",
         "fs mv <from> <to>",
         "fs upload <localPath> <remotePath>",
@@ -319,6 +323,12 @@ function printHelp() {
 
   fs cat <file>
     读取远端文件并尝试按文本打印
+
+  fs create <path>
+    在远端创建空文件
+
+  fs mkdir <path>
+    在远端创建目录
 
   fs rm <path>
     删除远端文件或目录
@@ -583,7 +593,9 @@ async function handleFs(args) {
   const sub = args[0];
 
   if (!sub) {
-    throw new Error("用法: fs <pwd|cd|ls|stat|cat|rm|mv|upload|download> ...");
+    throw new Error(
+      "用法: fs <pwd|cd|ls|stat|cat|create|mkdir|rm|mv|upload|download> ...",
+    );
   }
 
   switch (sub) {
@@ -709,6 +721,46 @@ async function handleFs(args) {
       console.log("=".repeat(80));
       console.log(buffer.toString("utf8"));
       console.log("=".repeat(80));
+      return;
+    }
+
+    case "create": {
+      const targetArg = args[1];
+      if (!targetArg) {
+        throw new Error("用法: fs create <path>");
+      }
+
+      const target = resolveRemotePath(targetArg, slaveId);
+      const meta = await master.fs.create(slaveId, target, {
+        timeoutMs: 10000,
+      });
+
+      output("fs.create", `[MASTER][FS] 已创建空文件: ${target}`, {
+        ok: true,
+        slaveId,
+        target,
+        meta,
+      });
+      return;
+    }
+
+    case "mkdir": {
+      const targetArg = args[1];
+      if (!targetArg) {
+        throw new Error("用法: fs mkdir <path>");
+      }
+
+      const target = resolveRemotePath(targetArg, slaveId);
+      const meta = await master.fs.mkdir(slaveId, target, {
+        timeoutMs: 10000,
+      });
+
+      output("fs.mkdir", `[MASTER][FS] 已创建目录: ${target}`, {
+        ok: true,
+        slaveId,
+        target,
+        meta,
+      });
       return;
     }
 

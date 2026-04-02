@@ -230,6 +230,7 @@ await slave.start();
 - 所有远端路径都必须落在 `rootPath` 范围内
 - 当前实现会拒绝穿过符号链接（Linux/macOS symlink）或目录联接（Windows junction）的访问，避免通过链接跳出 `root`
 - 如果路径命中 `allowedPaths` / `denyGlobs` 或写操作策略限制，请求会被直接拒绝
+- `master.fs.upload()` 会阻止“目录被文件覆盖”：当目标路径是目录时，不会执行目录删除后再写入文件的行为
 
 `policy` 支持以下字段：
 
@@ -274,6 +275,16 @@ await slave.start();
 - `master.fs.stat(slaveId, path, options?)`
 - `master.fs.upload(slaveId, localPath, remotePath, options?)`
 - `master.fs.download(slaveId, remotePath, localPath, options?)`
+
+`upload(remotePath)` 路径语义（`localPath` 必须是本地文件）：
+
+- 当 `remotePath` 以 `/` 或 `\` 结尾时，按“目录路径”处理，自动落盘为 `remotePath + basename(localPath)`
+  - 例如：`assets/` + `banner.txt` => `assets/banner.txt`
+- 当 `remotePath` 为 `.` / `./` / `.\` 时，按 `fs root` 根目录处理，自动落盘为 `basename(localPath)`
+- 当 `remotePath` 不带结尾斜杠，但远端该路径已存在且是目录时，仍按目录处理，自动落盘为 `remotePath/basename(localPath)`
+  - 例如：`test` 已存在目录时，上传 `banner.txt` => `test/banner.txt`
+- 其他情况按“明确文件路径”处理（可覆盖已有文件）
+- 出于安全考虑，上传不会把已有目录替换成文件；若最终目标是目录会直接拒绝
 
 详细 API 和完整示例请分别查看：
 

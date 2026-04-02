@@ -1372,10 +1372,28 @@ slave.fs.setRoot("./storage", {
 |------|------|------|------|
 | `slaveId` | `string` | 是 | 目标从节点 |
 | `localPath` | `string` | 是 | 本地文件路径 |
-| `remotePath` | `string` | 是 | 远端目标路径 |
+| `remotePath` | `string` | 是 | 远端目标路径（支持目录语义） |
 | `options` | `object` | 否 | 上传配置 |
 | `options.chunkSize` | `number` | 否 | 分片大小 |
 | `options.timeoutMs` | `number` | 否 | 单次 service 请求超时 |
+
+#### `remotePath` 路径语义
+
+`upload()` 中的 `remotePath` 既可以表示“文件路径”，也可以表示“目录路径”：
+
+1. 以 `/` 或 `\` 结尾时，按目录路径处理  
+   最终目标会自动拼接 `basename(localPath)`。
+   - 例如：`assets/` + `banner.txt` => `assets/banner.txt`
+
+2. 为 `.` / `./` / `.\` 时，按 `fs root` 根目录处理  
+   最终目标为 `basename(localPath)`。
+
+3. 不带结尾斜杠，但远端该路径已存在且是目录时，仍按目录路径处理  
+   最终目标会自动拼接 `basename(localPath)`。
+   - 例如：`incoming` 已存在目录，上传 `upload.txt` => `incoming/upload.txt`
+
+4. 其他情况按明确文件路径处理  
+   可覆盖已有普通文件。
 
 #### 返回值
 
@@ -1438,6 +1456,7 @@ slave.fs.setRoot("./storage", {
 - 支持断点续传
 - 默认分片大小约为 `5MB`
 - 内部有上下限保护
+- 安全保护：不会把已有目录覆盖成文件（命中该情况会直接拒绝）
 
 #### 适用场景
 

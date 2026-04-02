@@ -69,6 +69,8 @@ export async function runFsServiceTests(runner) {
       const baseDir = path.resolve("test/tmp/fs-plain");
       const rootDir = path.join(baseDir, "remote");
       const uploadSource = path.join(baseDir, "upload-source.txt");
+      const uploadSourceDir = path.join(baseDir, "banner.txt");
+      const uploadSourceDot = path.join(baseDir, "root-note.txt");
       const downloadTarget = path.join(baseDir, "downloaded.txt");
 
       await resetDir(baseDir);
@@ -79,6 +81,8 @@ export async function runFsServiceTests(runner) {
         "utf8",
       );
       await fs.writeFile(uploadSource, "upload-body-001", "utf8");
+      await fs.writeFile(uploadSourceDir, "upload-body-dir", "utf8");
+      await fs.writeFile(uploadSourceDot, "upload-body-dot", "utf8");
 
       const master = new ZNL({
         role: "master",
@@ -213,6 +217,97 @@ export async function runFsServiceTests(runner) {
           `rename 后目录包含 renamed.txt → ${JSON.stringify(list2.entries)}`,
         );
 
+        const assetsDir = await master.fs.mkdir("s-fs", "assets", {
+          timeoutMs: scaleMs(2000),
+          recursive: true,
+          existOk: true,
+        });
+        runner.assert(
+          assetsDir.ok === true,
+          `upload 目录准备成功 → ${JSON.stringify(assetsDir)}`,
+        );
+
+        const uploadToTrailingSlash = await master.fs.upload(
+          "s-fs",
+          uploadSourceDir,
+          "assets/",
+          {
+            timeoutMs: scaleMs(3000),
+            chunkSize: 128 * 1024,
+          },
+        );
+        runner.assert(
+          uploadToTrailingSlash.ok === true,
+          "upload 到目录路径(带 /) 完成",
+        );
+
+        const uploadedToAssets = await master.fs.get(
+          "s-fs",
+          "assets/banner.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(uploadedToAssets) === "upload-body-dir",
+          `upload 到 assets/ 应落盘为 assets/banner.txt → "${readFsBodyText(uploadedToAssets)}"`,
+        );
+
+        const uploadToDot = await master.fs.upload(
+          "s-fs",
+          uploadSourceDot,
+          ".",
+          {
+            timeoutMs: scaleMs(3000),
+            chunkSize: 128 * 1024,
+          },
+        );
+        runner.assert(uploadToDot.ok === true, "upload 到 . 根目录完成");
+
+        const uploadedToRoot = await master.fs.get("s-fs", "root-note.txt", {
+          timeoutMs: scaleMs(2000),
+        });
+        runner.assert(
+          readFsBodyText(uploadedToRoot) === "upload-body-dot",
+          `upload 到 . 应落盘为 root-note.txt → "${readFsBodyText(uploadedToRoot)}"`,
+        );
+
+        const incomingDir = await master.fs.mkdir("s-fs", "incoming", {
+          timeoutMs: scaleMs(2000),
+          recursive: true,
+          existOk: true,
+        });
+        runner.assert(
+          incomingDir.ok === true,
+          `existing 目录准备成功 → ${JSON.stringify(incomingDir)}`,
+        );
+
+        const uploadToExistingDir = await master.fs.upload(
+          "s-fs",
+          uploadSource,
+          "incoming",
+          {
+            timeoutMs: scaleMs(3000),
+            chunkSize: 128 * 1024,
+          },
+        );
+        runner.assert(
+          uploadToExistingDir.ok === true,
+          "upload 到已有目录路径(不带 /) 完成",
+        );
+
+        const uploadedToExistingDir = await master.fs.get(
+          "s-fs",
+          "incoming/upload-source.txt",
+          {
+            timeoutMs: scaleMs(2000),
+          },
+        );
+        runner.assert(
+          readFsBodyText(uploadedToExistingDir) === "upload-body-001",
+          `upload 到 existing dir 应落盘为 incoming/upload-source.txt → "${readFsBodyText(uploadedToExistingDir)}"`,
+        );
+
         const uploadResult = await master.fs.upload(
           "s-fs",
           uploadSource,
@@ -222,7 +317,7 @@ export async function runFsServiceTests(runner) {
             chunkSize: 128 * 1024,
           },
         );
-        runner.assert(uploadResult.ok === true, "upload 完成");
+        runner.assert(uploadResult.ok === true, "upload 到明确文件路径完成");
 
         const uploaded = await master.fs.get("s-fs", "uploaded.txt", {
           timeoutMs: scaleMs(2000),

@@ -291,13 +291,64 @@ async function resolveSafeParentPath(root, inputPath) {
     throw new Error("路径越权：目标不在 root 范围内。");
   }
 
-  const parent = path.dirname(target);
+  const parent = target === root ? root : path.dirname(target);
   await ensureNoSymlinkInPath(root, parent, { allowMissingLeaf: true });
 
   return {
     relativePath: toPosixPath(path.relative(root, target) || "."),
     absolutePath: target,
   };
+}
+
+function isUploadDirectoryHint(inputPath) {
+  const raw = String(inputPath ?? "").trim();
+  if (!raw) return false;
+  if (raw === "." || raw === "./" || raw === ".\\") return true;
+  return /[\\/]+$/u.test(raw);
+}
+
+function normalizeUploadFileName(fileName) {
+  const text = String(fileName ?? "").trim();
+  if (!text) {
+    throw new Error("upload 缺少有效 fileName。");
+  }
+
+  if (text.includes("/") || text.includes("\\")) {
+    throw new Error("upload fileName 不能包含路径分隔符。");
+  }
+
+  if (text === "." || text === "..") {
+    throw new Error("upload fileName 非法。");
+  }
+
+  return text;
+}
+
+async function resolveUploadTargetPath(root, inputPath, fileName) {
+  const normalizedRoot = assertRoot(root);
+  const requested = await resolveSafeParentPath(normalizedRoot, inputPath);
+  const requestedStat = await lstatSafe(requested.absolutePath);
+
+  if (requestedStat?.isSymbolicLink()) {
+    throw new Error("拒绝写入符号链接目标。");
+  }
+
+  const isDirectoryTarget =
+    requested.relativePath === "." ||
+    isUploadDirectoryHint(inputPath) ||
+    Boolean(requestedStat?.isDirectory());
+
+  if (!isDirectoryTarget) {
+    return requested;
+  }
+
+  const safeName = normalizeUploadFileName(fileName);
+  const combinedRelative =
+    requested.relativePath === "."
+      ? safeName
+      : `${requested.relativePath}/${safeName}`;
+
+  return resolveSafeParentPath(normalizedRoot, combinedRelative);
 }
 
 function enforcePathPolicy(policy, relativePath, { op, write = false } = {}) {
@@ -694,9 +745,18 @@ export function createSlaveFsApi(slave) {
   async function handleInit(meta) {
     const sessionId = toSessionId(meta.sessionId);
     const chunkSize = normalizeChunkSize(meta.chunkSize);
-    const targetInfo = await resolveWritePath(meta.path, OPS.INIT, {
-      allowMissingLeaf: true,
+    const root = ensureRootConfigured();
+    const targetInfo = await resolveUploadTargetPath(
+      root,
+      meta.path,
+      meta.fileName,
+    );
+
+    enforcePathPolicy(policy, targetInfo.relativePath, {
+      op: OPS.INIT,
+      write: true,
     });
+
     const tmpPath = `${targetInfo.absolutePath}.tmp`;
 
     const tmpExisting = await lstatSafe(tmpPath);
@@ -805,9 +865,14 @@ export function createSlaveFsApi(slave) {
     if (targetStat?.isSymbolicLink()) {
       throw new Error("拒绝覆盖符号链接。");
     }
+    if (targetStat?.isDirectory()) {
+      throw new Error("拒绝将目录覆盖为文件。");
+    }
 
     await ensureDir(path.dirname(session.targetPath));
-    await removeIfExists(session.targetPath);
+    if (targetStat) {
+      await fs.rm(session.targetPath, { force: true });
+    }
     await fs.rename(session.tmpPath, session.targetPath);
 
     sessions.delete(sessionId);

@@ -280,7 +280,45 @@ fs cat notes/sample.json
   - 文本输出为 `utf8`
   - 二进制输出为 `base64`
 
-### 7.6 删除远端文件或目录
+### 7.6 创建远端空文件
+
+```text
+fs create <path>
+```
+
+示例：
+
+```text
+fs create hello.empty.txt
+fs create notes/todo.txt
+```
+
+说明：
+
+- 用于创建远端空文件
+- 缺失的父目录会自动创建
+- 如果目标文件已存在，当前实现会直接报错
+
+### 7.7 创建远端目录
+
+```text
+fs mkdir <path>
+```
+
+示例：
+
+```text
+fs mkdir logs
+fs mkdir notes/archive/2025
+```
+
+说明：
+
+- 用于创建远端目录
+- 默认支持递归创建多级目录
+- 如果目录已存在，当前实现会视为成功
+
+### 7.8 删除远端文件或目录
 
 ```text
 fs rm <path>
@@ -298,7 +336,7 @@ fs rm notes
 - 支持删除文件
 - 支持递归删除目录
 
-### 7.7 重命名或移动远端文件
+### 7.9 重命名或移动远端文件
 
 ```text
 fs mv <from> <to>
@@ -311,7 +349,7 @@ fs mv hello.txt hello.backup.txt
 fs mv notes/sample.json sample.json
 ```
 
-### 7.8 上传本地文件到远端
+### 7.10 上传本地文件到远端
 
 ```text
 fs upload <localPath> <remotePath>
@@ -329,7 +367,7 @@ fs upload ./README.md docs/README.copy.md
 - `localPath` 是 `master` 本地路径
 - `remotePath` 是当前 `slave` 根目录下的相对路径
 
-### 7.9 从远端下载文件到本地
+### 7.11 从远端下载文件到本地
 
 ```text
 fs download <remotePath> <localPath>
@@ -347,13 +385,13 @@ fs download notes/sample.json ./tmp/sample.json
 - `remotePath` 是 `slave` 上的文件
 - `localPath` 是 `master` 本地保存路径
 
-### 7.10 清屏
+### 7.12 清屏
 
 ```text
 clear
 ```
 
-### 7.11 退出
+### 7.13 退出
 
 ```text
 exit
@@ -431,6 +469,8 @@ node test/master/index.js --json
 - `fs.list`
 - `fs.stat`
 - `fs.cat`
+- `fs.create`
+- `fs.mkdir`
 - `fs.rm`
 - `fs.mv`
 - `fs.upload`
@@ -534,41 +574,50 @@ fs cat hello.txt
 fs cat notes/sample.json
 ```
 
-### 第七步：发送普通 RPC
+### 第七步：创建目录和空文件
+
+```text
+fs mkdir tmp
+fs create tmp/demo.txt
+fs ls tmp
+```
+
+### 第八步：发送普通 RPC
 
 ```text
 ping whoami
 ```
 
-### 第八步：上传文件
+### 第九步：上传文件
 
 ```text
 fs upload ./package.json package.json.copy
 ```
 
-### 第九步：确认文件已上传
+### 第十步：确认文件已上传
 
 ```text
 fs ls
 fs stat package.json.copy
 ```
 
-### 第十步：下载文件
+### 第十一步：下载文件
 
 ```text
 fs download package.json.copy ./tmp/package.json.copy
 ```
 
-### 第十一步：重命名文件
+### 第十二步：重命名文件
 
 ```text
 fs mv package.json.copy package.json.bak
 ```
 
-### 第十二步：删除文件
+### 第十三步：删除文件
 
 ```text
 fs rm package.json.bak
+fs rm tmp
 ```
 
 ---
@@ -651,6 +700,8 @@ fs pwd
 fs cd notes
 fs stat sample.json
 fs cat sample.json
+fs mkdir tmp
+fs create tmp/demo.txt
 fs upload ./a.txt a.txt
 fs download a.txt ./tmp/a.txt
 fs mv a.txt b.txt
@@ -669,18 +720,3 @@ ping whoami
 ```text
 exit
 ```
-
----
-
-## 15. 建议
-
-如果你后续还想扩展这个测试 CLI，推荐优先增加：
-
-- `fs mkdir`
-- `fs tree`
-- `fs write`
-- `--auth-key`
-- 单命令执行模式，如：
-  - `--json-once "fs ls"`
-
-这样可以更方便集成到自动化测试或脚本中。

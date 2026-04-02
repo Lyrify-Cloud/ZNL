@@ -953,23 +953,58 @@ console.log(result.applied);
 
 ## 22. 上传文件到远端
 
-### 22.1 最简单上传
+### 22.1 最简单上传（目录路径写法）
 
 ```js
 await master.fs.upload(
   "slave-001",
   "./local/upload.txt",
-  "remote/upload.txt",
+  "remote/",
 );
 ```
 
-### 22.2 指定分片大小和超时
+行为：
+
+- `remotePath` 以 `/` 结尾时，按目录处理
+- 最终会落盘为：`remote/upload.txt`
+
+### 22.2 上传到 root（`.`）目录
+
+```js
+await master.fs.upload(
+  "slave-001",
+  "./local/root-note.txt",
+  ".",
+);
+```
+
+行为：
+
+- `remotePath` 为 `.` / `./` / `.\` 时，按 `fs root` 根目录处理
+- 最终会落盘为：`root-note.txt`
+
+### 22.3 目标路径不带 `/`，但远端已存在目录
+
+```js
+await master.fs.upload(
+  "slave-001",
+  "./local/banner.txt",
+  "assets",
+);
+```
+
+行为：
+
+- 当远端 `assets` 已存在且是目录时，也会按目录处理
+- 最终会落盘为：`assets/banner.txt`
+
+### 22.4 指定分片大小和超时
 
 ```js
 await master.fs.upload(
   "slave-001",
   "./local/big-file.zip",
-  "packages/big-file.zip",
+  "packages/",
   {
     chunkSize: 1024 * 1024,
     timeoutMs: 5000,
@@ -983,6 +1018,7 @@ await master.fs.upload(
 - 传输过程中带 ACK
 - 支持断点续传
 - 适合大文件
+- 上传不会把已有目录替换成文件（目录目标会被安全处理）
 
 推荐：
 
