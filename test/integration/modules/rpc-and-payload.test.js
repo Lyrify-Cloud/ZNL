@@ -6,13 +6,17 @@ import {
   safeStop,
   toText,
 } from "../helpers/common.js";
+import { createPortAllocator } from "../helpers/ports.js";
 
 installTimeoutScaling();
+
+const ports = createPortAllocator({ offset: 401 });
+const takeEndpoint = () => ports.nextEndpoint();
 
 export async function runRpcAndPayloadTests(runner) {
   runner.section("RPC 双向通信与载荷");
 
-  const EP1 = "tcp://127.0.0.1:16003";
+  const EP1 = takeEndpoint();
 
   const master = new ZNL({
     role: "master",
@@ -68,61 +72,64 @@ export async function runRpcAndPayloadTests(runner) {
       );
     });
 
-    await runner.test("request / response 事件在双向 RPC 中正确触发", async () => {
-      const masterRequests = [];
-      const masterResponses = [];
-      const slaveRequests = [];
-      const slaveResponses = [];
+    await runner.test(
+      "request / response 事件在双向 RPC 中正确触发",
+      async () => {
+        const masterRequests = [];
+        const masterResponses = [];
+        const slaveRequests = [];
+        const slaveResponses = [];
 
-      master.on("request", ({ identityText, payload }) => {
-        masterRequests.push(`${identityText}:${toText(payload)}`);
-      });
-      master.on("response", ({ identityText, payload }) => {
-        masterResponses.push(`${identityText}:${toText(payload)}`);
-      });
+        master.on("request", ({ identityText, payload }) => {
+          masterRequests.push(`${identityText}:${toText(payload)}`);
+        });
+        master.on("response", ({ identityText, payload }) => {
+          masterResponses.push(`${identityText}:${toText(payload)}`);
+        });
 
-      slave.on("request", ({ payload }) => {
-        slaveRequests.push(toText(payload));
-      });
-      slave.on("response", ({ payload }) => {
-        slaveResponses.push(toText(payload));
-      });
+        slave.on("request", ({ payload }) => {
+          slaveRequests.push(toText(payload));
+        });
+        slave.on("response", ({ payload }) => {
+          slaveResponses.push(toText(payload));
+        });
 
-      const res1 = await slave.DEALER("evt-a", { timeoutMs: 3000 });
-      const res2 = await master.ROUTER("test-slave", "evt-b", {
-        timeoutMs: 3000,
-      });
+        const res1 = await slave.DEALER("evt-a", { timeoutMs: 3000 });
+        const res2 = await master.ROUTER("test-slave", "evt-b", {
+          timeoutMs: 3000,
+        });
 
-      runner.assert(
-        toText(res1) === "M:evt-a",
-        `slave→master 响应正确 → "${toText(res1)}"`,
-      );
-      runner.assert(
-        toText(res2) === "S:evt-b",
-        `master→slave 响应正确 → "${toText(res2)}"`,
-      );
+        runner.assert(
+          toText(res1) === "M:evt-a",
+          `slave→master 响应正确 → "${toText(res1)}"`,
+        );
+        runner.assert(
+          toText(res2) === "S:evt-b",
+          `master→slave 响应正确 → "${toText(res2)}"`,
+        );
 
-      runner.assert(
-        masterRequests.includes("test-slave:evt-a"),
-        `master request 事件正确 → ${masterRequests.join(", ")}`,
-      );
-      runner.assert(
-        masterResponses.some((v) => v === "test-slave:S:evt-b"),
-        `master response 事件正确 → ${masterResponses.join(", ")}`,
-      );
-      runner.assert(
-        slaveRequests.includes("evt-b"),
-        `slave request 事件正确 → ${slaveRequests.join(", ")}`,
-      );
-      runner.assert(
-        slaveResponses.includes("M:evt-a"),
-        `slave response 事件正确 → ${slaveResponses.join(", ")}`,
-      );
-    });
+        runner.assert(
+          masterRequests.includes("test-slave:evt-a"),
+          `master request 事件正确 → ${masterRequests.join(", ")}`,
+        );
+        runner.assert(
+          masterResponses.some((v) => v === "test-slave:S:evt-b"),
+          `master response 事件正确 → ${masterResponses.join(", ")}`,
+        );
+        runner.assert(
+          slaveRequests.includes("evt-b"),
+          `slave request 事件正确 → ${slaveRequests.join(", ")}`,
+        );
+        runner.assert(
+          slaveResponses.includes("M:evt-a"),
+          `slave response 事件正确 → ${slaveResponses.join(", ")}`,
+        );
+      },
+    );
 
     await runner.test("并发 100 条请求（全部内容一致性校验）", async () => {
       logState.silent = true;
-      runner.log('    [并发] 正在发送 100 条请求...');
+      runner.log("    [并发] 正在发送 100 条请求...");
 
       const tasks = Array.from({ length: 100 }, (_, i) =>
         slave.DEALER(`item-${i}`, { timeoutMs: 5000 }),
@@ -130,9 +137,13 @@ export async function runRpcAndPayloadTests(runner) {
       const results = await Promise.all(tasks);
 
       logState.silent = false;
-      runner.log(`    [并发] 全部完成：发出 100 条 / 收到 ${results.length} 条`);
+      runner.log(
+        `    [并发] 全部完成：发出 100 条 / 收到 ${results.length} 条`,
+      );
 
-      const allOk = results.every((value, i) => toText(value) === `M:item-${i}`);
+      const allOk = results.every(
+        (value, i) => toText(value) === `M:item-${i}`,
+      );
       runner.assert(allOk, "100 条并发响应内容全部匹配，无乱序");
     });
 
@@ -161,7 +172,7 @@ export async function runRpcAndPayloadTests(runner) {
     });
 
     await runner.test("多帧 payload 保持顺序与内容", async () => {
-      const EP_PAYLOAD = "tcp://127.0.0.1:16015";
+      const EP_PAYLOAD = takeEndpoint();
 
       const payloadMaster = new ZNL({
         role: "master",

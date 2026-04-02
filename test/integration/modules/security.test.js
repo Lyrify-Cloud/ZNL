@@ -20,8 +20,12 @@ import {
   toText,
   waitForRegistered,
 } from "../helpers/common.js";
+import { createPortAllocator } from "../helpers/ports.js";
 
 installTimeoutScaling();
+
+const ports = createPortAllocator({ offset: 601 });
+const takeEndpoint = () => ports.nextEndpoint();
 
 export async function runSecurityTests(runner) {
   runner.section("安全 / 认证 / 加密");
@@ -106,7 +110,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "错误 authKey（encrypted=true）→ master 丢弃请求并触发 auth_failed 事件",
     async () => {
-      const EP_AUTH = "tcp://127.0.0.1:16014";
+      const EP_AUTH = takeEndpoint();
 
       const master = new ZNL({
         role: "master",
@@ -151,7 +155,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "错误 master key（encrypted=true）→ slave 触发 auth_failed",
     async () => {
-      const EP_AUTH2 = "tcp://127.0.0.1:16019";
+      const EP_AUTH2 = takeEndpoint();
 
       const wrongMaster = new ZNL({
         role: "master",
@@ -196,7 +200,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：RPC + PUB/SUB 正常（透明加解密）",
     async () => {
-      const EP = "tcp://127.0.0.1:16012";
+      const EP = takeEndpoint();
       const KEY = "sec-encrypted-key-001";
 
       const master = new ZNL({
@@ -258,7 +262,7 @@ export async function runSecurityTests(runner) {
   );
 
   await runner.test("encrypted 模式：PUSH 正常（透明加解密）", async () => {
-    const EP = "tcp://127.0.0.1:16025";
+    const EP = takeEndpoint();
     const KEY = "sec-encrypted-push";
 
     const master = new ZNL({
@@ -314,7 +318,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：payloadDigest 配置不一致（PUBLISH）触发 auth_failed",
     async () => {
-      const EP = "tcp://127.0.0.1:16024";
+      const EP = takeEndpoint();
       const KEY = "sec-encrypted-pub-digest";
 
       const master = new ZNL({
@@ -365,7 +369,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：关闭 payloadDigest 后仍可通信",
     async () => {
-      const EP = "tcp://127.0.0.1:16037";
+      const EP = takeEndpoint();
       const KEY = "sec-encrypted-digest-off";
 
       const master = new ZNL({
@@ -407,7 +411,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：payloadDigest 配置不一致（RPC）可能导致认证失败",
     async () => {
-      const EP = "tcp://127.0.0.1:16038";
+      const EP = takeEndpoint();
       const KEY = "sec-encrypted-digest-rpc";
 
       const master = new ZNL({
@@ -457,7 +461,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：防重放（同 nonce+requestId）触发拒绝",
     async () => {
-      const EP = "tcp://127.0.0.1:16030";
+      const EP = takeEndpoint();
       const KEY = "sec-replay-key";
       const NODE = "replay-slave";
 
@@ -520,7 +524,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：同 nonce 不同 requestId 不应触发重放",
     async () => {
-      const EP = "tcp://127.0.0.1:16039";
+      const EP = takeEndpoint();
       const KEY = "sec-replay-key-2";
       const NODE = "replay-slave-2";
 
@@ -588,7 +592,7 @@ export async function runSecurityTests(runner) {
   );
 
   await runner.test("encrypted 模式：时间漂移超限被拒绝", async () => {
-    const EP = "tcp://127.0.0.1:16033";
+    const EP = takeEndpoint();
     const KEY = "sec-time-skew";
     const NODE = "time-skew-slave";
 
@@ -636,7 +640,7 @@ export async function runSecurityTests(runner) {
   });
 
   await runner.test("authKeyMap 优先级：命中 map 时不回退", async () => {
-    const EP = "tcp://127.0.0.1:16034";
+    const EP = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -721,7 +725,7 @@ export async function runSecurityTests(runner) {
   });
 
   await runner.test("authKeyMap 更新后在线 key 立即切换", async () => {
-    const EP = "tcp://127.0.0.1:16035";
+    const EP = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -822,7 +826,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：authKeyMap 未命中时回退到 authKey",
     async () => {
-      const EP = "tcp://127.0.0.1:16026";
+      const EP = takeEndpoint();
 
       const master = new ZNL({
         role: "master",
@@ -864,7 +868,7 @@ export async function runSecurityTests(runner) {
   await runner.test(
     "encrypted 模式：authKeyMap 动态 add/remove 立即生效",
     async () => {
-      const EP = "tcp://127.0.0.1:16027";
+      const EP = takeEndpoint();
 
       const master = new ZNL({
         role: "master",

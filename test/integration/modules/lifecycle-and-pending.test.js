@@ -9,14 +9,18 @@ import {
   scaleMs,
 } from "../helpers/common.js";
 import { expectRejected } from "../helpers/assertions.js";
+import { createPortAllocator } from "../helpers/ports.js";
 
 installTimeoutScaling();
+
+const ports = createPortAllocator({ offset: 301 });
+const takeEndpoint = () => ports.nextEndpoint();
 
 export async function runLifecycleAndPendingTests(runner) {
   runner.section("生命周期 / 超时 / Pending");
 
   await runner.test("start()/stop() 可重复调用且无异常", async () => {
-    const EP_IDEMP = "tcp://127.0.0.1:16016";
+    const EP_IDEMP = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -48,7 +52,7 @@ export async function runLifecycleAndPendingTests(runner) {
   });
 
   await runner.test("stop 后重新 start 可恢复通信", async () => {
-    const EP_RS = "tcp://127.0.0.1:16023";
+    const EP_RS = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -93,7 +97,7 @@ export async function runLifecycleAndPendingTests(runner) {
   });
 
   await runner.test("未 start 时调用 DEALER/ROUTER 应抛错", async () => {
-    const EP_PRE = "tcp://127.0.0.1:16017";
+    const EP_PRE = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -133,7 +137,7 @@ export async function runLifecycleAndPendingTests(runner) {
   await runner.test(
     "master 无处理器 → slave 在指定时间内正确超时",
     async () => {
-      const EP_TIMEOUT = "tcp://127.0.0.1:16004";
+      const EP_TIMEOUT = takeEndpoint();
 
       const master = new ZNL({
         role: "master",
@@ -176,7 +180,7 @@ export async function runLifecycleAndPendingTests(runner) {
   );
 
   await runner.test("maxPending 达到上限时拒绝新请求", async () => {
-    const EP_MAX_PENDING = "tcp://127.0.0.1:16018";
+    const EP_MAX_PENDING = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -224,7 +228,7 @@ export async function runLifecycleAndPendingTests(runner) {
   });
 
   await runner.test("stop() 期间所有 in-flight 请求立即 reject", async () => {
-    const EP_STOP_PENDING = "tcp://127.0.0.1:16005";
+    const EP_STOP_PENDING = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -269,7 +273,7 @@ export async function runLifecycleAndPendingTests(runner) {
   });
 
   await runner.test("master→slave 顺序保持（20 条）", async () => {
-    const EP_SEND_ORDER = "tcp://127.0.0.1:16036";
+    const EP_SEND_ORDER = takeEndpoint();
 
     const master = new ZNL({
       role: "master",

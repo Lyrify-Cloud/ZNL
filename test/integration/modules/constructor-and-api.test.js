@@ -2,8 +2,12 @@ import { ZNL } from "../../../index.js";
 import { PendingManager } from "../../../src/PendingManager.js";
 import { installTimeoutScaling } from "../helpers/common.js";
 import { expectRejected } from "../helpers/assertions.js";
+import { createPortAllocator } from "../helpers/ports.js";
 
 installTimeoutScaling();
+
+const ports = createPortAllocator({ offset: 101 });
+const takeEndpoint = () => ports.nextEndpoint();
 
 function assertRejectedWith(runner, result, expectedText, title) {
   runner.assert(result.rejected, `${title}：应抛错`);
@@ -69,7 +73,7 @@ export async function runConstructorAndApiTests(runner) {
       const slave = new ZNL({
         role: "slave",
         id: "s-api-default",
-        endpoints: { router: "tcp://127.0.0.1:16101" },
+        endpoints: { router: takeEndpoint() },
       });
 
       runner.assert(
@@ -89,7 +93,7 @@ export async function runConstructorAndApiTests(runner) {
       const master = new ZNL({
         role: "master",
         id: "m-api-default",
-        endpoints: { router: "tcp://127.0.0.1:16102" },
+        endpoints: { router: takeEndpoint() },
       });
 
       runner.assert(
@@ -107,7 +111,7 @@ export async function runConstructorAndApiTests(runner) {
     const slave = new ZNL({
       role: "slave",
       id: "s-role-publish",
-      endpoints: { router: "tcp://127.0.0.1:16103" },
+      endpoints: { router: takeEndpoint() },
     });
 
     const result = await expectRejected(
@@ -122,7 +126,7 @@ export async function runConstructorAndApiTests(runner) {
     const master = new ZNL({
       role: "master",
       id: "m-role-subscribe",
-      endpoints: { router: "tcp://127.0.0.1:16104" },
+      endpoints: { router: takeEndpoint() },
     });
 
     const result = await expectRejected(
@@ -137,7 +141,7 @@ export async function runConstructorAndApiTests(runner) {
     const master = new ZNL({
       role: "master",
       id: "m-role-unsubscribe",
-      endpoints: { router: "tcp://127.0.0.1:16105" },
+      endpoints: { router: takeEndpoint() },
     });
 
     const result = await expectRejected(
@@ -152,7 +156,7 @@ export async function runConstructorAndApiTests(runner) {
     const master = new ZNL({
       role: "master",
       id: "m-role-push",
-      endpoints: { router: "tcp://127.0.0.1:16106" },
+      endpoints: { router: takeEndpoint() },
     });
 
     const result = await expectRejected(
@@ -167,7 +171,7 @@ export async function runConstructorAndApiTests(runner) {
     const slave = new ZNL({
       role: "slave",
       id: "s-role-add-auth",
-      endpoints: { router: "tcp://127.0.0.1:16107" },
+      endpoints: { router: takeEndpoint() },
     });
 
     const result = await expectRejected(
@@ -182,7 +186,7 @@ export async function runConstructorAndApiTests(runner) {
     const slave = new ZNL({
       role: "slave",
       id: "s-role-remove-auth",
-      endpoints: { router: "tcp://127.0.0.1:16108" },
+      endpoints: { router: takeEndpoint() },
     });
 
     const result = await expectRejected(

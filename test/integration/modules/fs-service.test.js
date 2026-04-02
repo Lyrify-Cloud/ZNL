@@ -13,8 +13,12 @@ import {
   toText,
   waitForRegistered,
 } from "../helpers/common.js";
+import { createPortAllocator } from "../helpers/ports.js";
 
 installTimeoutScaling();
+
+const ports = createPortAllocator({ offset: 701 });
+const takeEndpoint = () => ports.nextEndpoint();
 
 async function expectRejected(action, messageIncludes = []) {
   let error = null;
@@ -65,7 +69,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "plain 模式：fs CRUD + patch + upload/download 正常",
     async () => {
-      const EP_FS = "tcp://127.0.0.1:16040";
+      const EP_FS = takeEndpoint();
       const baseDir = path.resolve("test/tmp/fs-plain");
       const rootDir = path.join(baseDir, "remote");
       const uploadSource = path.join(baseDir, "upload-source.txt");
@@ -367,7 +371,7 @@ export async function runFsServiceTests(runner) {
   );
 
   await runner.test("plain 模式：fs root 越权访问被拒绝", async () => {
-    const EP_FS_SEC = "tcp://127.0.0.1:16041";
+    const EP_FS_SEC = takeEndpoint();
     const baseDir = path.resolve("test/tmp/fs-boundary");
     const rootDir = path.join(baseDir, "remote");
 
@@ -409,7 +413,7 @@ export async function runFsServiceTests(runner) {
   });
 
   await runner.test("plain 模式：未设置 fs root 时请求被拒绝", async () => {
-    const EP_FS_ROOT = "tcp://127.0.0.1:16043";
+    const EP_FS_ROOT = takeEndpoint();
 
     const master = new ZNL({
       role: "master",
@@ -447,7 +451,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "plain 模式：fs 应拒绝通过 symlink / junction 越界访问 root 外文件",
     async () => {
-      const EP_FS_SYMLINK = "tcp://127.0.0.1:16046";
+      const EP_FS_SYMLINK = takeEndpoint();
       const baseDir = path.resolve("test/tmp/fs-symlink-escape");
       const rootDir = path.join(baseDir, "remote");
       const outsideDir = path.join(baseDir, "outside");
@@ -557,7 +561,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "plain 模式：setRoot 策略 readOnly=true 应拒绝写操作",
     async () => {
-      const EP_FS_POLICY_RO = "tcp://127.0.0.1:16047";
+      const EP_FS_POLICY_RO = takeEndpoint();
       const baseDir = path.resolve("test/tmp/fs-policy-readonly");
       const rootDir = path.join(baseDir, "remote");
       const uploadSource = path.join(baseDir, "upload-source.txt");
@@ -703,7 +707,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "plain 模式：setRoot 路径策略应限制 allowedPaths / denyGlobs / allow*",
     async () => {
-      const EP_FS_POLICY = "tcp://127.0.0.1:16048";
+      const EP_FS_POLICY = takeEndpoint();
       const baseDir = path.resolve("test/tmp/fs-policy-paths");
       const rootDir = path.join(baseDir, "remote");
       const uploadSource = path.join(baseDir, "upload-source.txt");
@@ -892,7 +896,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "encrypted 模式：fs get + upload/download 正常",
     async () => {
-      const EP_FS_ENC = "tcp://127.0.0.1:16042";
+      const EP_FS_ENC = takeEndpoint();
       const KEY = "fs-encrypted-key";
       const baseDir = path.resolve("test/tmp/fs-encrypted");
       const rootDir = path.join(baseDir, "remote");
@@ -984,7 +988,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "plain 模式：fs 与普通 RPC/PUBLISH/PUSH 并发时互不串线",
     async () => {
-      const EP_FS_MIXED = "tcp://127.0.0.1:16044";
+      const EP_FS_MIXED = takeEndpoint();
       const baseDir = path.resolve("test/tmp/fs-mixed-plain");
       const rootDir = path.join(baseDir, "remote");
       const uploadSource = path.join(baseDir, "mixed-upload.txt");
@@ -1145,7 +1149,7 @@ export async function runFsServiceTests(runner) {
   await runner.test(
     "encrypted 模式：fs 与普通 RPC/PUBLISH/PUSH 并发时互不串线",
     async () => {
-      const EP_FS_MIXED_ENC = "tcp://127.0.0.1:16045";
+      const EP_FS_MIXED_ENC = takeEndpoint();
       const KEY = "fs-mixed-encrypted-key";
       const baseDir = path.resolve("test/tmp/fs-mixed-encrypted");
       const rootDir = path.join(baseDir, "remote");

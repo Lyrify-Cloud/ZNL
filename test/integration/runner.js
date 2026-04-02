@@ -3,10 +3,17 @@ export class TestRunner {
     verbose = false,
     reporter = process.env.ZNL_TEST_REPORTER || "human",
     exitOnComplete = true,
+    testTimeoutMs = Number(process.env.ZNL_TEST_CASE_TIMEOUT_MS ?? 20000),
   } = {}) {
     this.verbose = Boolean(verbose);
     this.reporter = reporter === "json" ? "json" : "human";
     this.exitOnComplete = Boolean(exitOnComplete);
+
+    const parsedTimeoutMs = Number(testTimeoutMs);
+    this.testTimeoutMs =
+      Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0
+        ? Math.trunc(parsedTimeoutMs)
+        : 0;
 
     this.passed = 0; // assertion-level
     this.failed = 0; // assertion-level
@@ -33,6 +40,9 @@ export class TestRunner {
     console.log("=".repeat(64));
     console.log(`  verbose=${this.verbose ? "on" : "off"}`);
     console.log(`  reporter=${this.reporter}`);
+    console.log(
+      `  caseTimeoutMs=${this.testTimeoutMs > 0 ? this.testTimeoutMs : "off"}`,
+    );
   }
 
   beginModule(name) {
@@ -159,15 +169,39 @@ export class TestRunner {
       failedAssertions: 0,
       failures: [],
       status: "passed",
+      timedOut: false,
     };
 
     this.currentTest = testCtx;
 
+    let timeoutId = null;
+
     try {
-      await fn();
+      if (this.testTimeoutMs > 0) {
+        const timeoutMs = this.testTimeoutMs;
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`测试用例超时（>${timeoutMs}ms）`));
+          }, timeoutMs);
+        });
+
+        await Promise.race([
+          Promise.resolve().then(() => fn()),
+          timeoutPromise,
+        ]);
+      } else {
+        await fn();
+      }
     } catch (error) {
-      this.fail(`未预期异常：${error?.message ?? error}`, error);
+      const message = String(error?.message ?? error ?? "");
+      const isTimeout = message.includes("测试用例超时");
+      testCtx.timedOut = isTimeout;
+      this.fail(`${isTimeout ? "用例超时" : "未预期异常"}：${message}`, error);
     } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+
       testCtx.endedAt = Date.now();
       testCtx.durationMs = testCtx.endedAt - testCtx.startedAt;
       testCtx.status = testCtx.failedAssertions > 0 ? "failed" : "passed";
@@ -177,6 +211,7 @@ export class TestRunner {
         label: testCtx.label,
         module: testCtx.module,
         status: testCtx.status,
+        timedOut: testCtx.timedOut,
         durationMs: testCtx.durationMs,
         startedAt: new Date(testCtx.startedAt).toISOString(),
         endedAt: new Date(testCtx.endedAt).toISOString(),

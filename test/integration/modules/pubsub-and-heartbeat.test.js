@@ -11,8 +11,12 @@ import {
   waitForOffline,
   waitForRegistered,
 } from "../helpers/common.js";
+import { createPortAllocator } from "../helpers/ports.js";
 
 installTimeoutScaling();
+
+const ports = createPortAllocator({ offset: 501 });
+const takeEndpoint = () => ports.nextEndpoint();
 
 export async function runPubsubAndHeartbeatTests(runner) {
   runner.section("PUB/SUB/PUSH 与心跳");
@@ -20,7 +24,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   await runner.test(
     "slave 只收到已订阅的 topic，未订阅的 topic 静默丢弃",
     async () => {
-      const EP4 = "tcp://127.0.0.1:16006";
+      const EP4 = takeEndpoint();
       const master = new ZNL({
         role: "master",
         id: "m4",
@@ -72,7 +76,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   await runner.test(
     "多 slave 广播：每个 slave 都能收到，slave.on('publish') 兜底监听（PUBLISH）",
     async () => {
-      const EP5 = "tcp://127.0.0.1:16007";
+      const EP5 = takeEndpoint();
       const master = new ZNL({
         role: "master",
         id: "m5",
@@ -144,7 +148,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   await runner.test(
     "slave_connected / slave_disconnected 事件在 start/stop 时正确触发",
     async () => {
-      const EP6 = "tcp://127.0.0.1:16008";
+      const EP6 = takeEndpoint();
       const master = new ZNL({
         role: "master",
         id: "m6",
@@ -191,7 +195,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   );
 
   await runner.test("UNSUBSCRIBE() 后不再收到该 topic 的消息", async () => {
-    const EP7 = "tcp://127.0.0.1:16009";
+    const EP7 = takeEndpoint();
     const master = new ZNL({
       role: "master",
       id: "m7",
@@ -231,7 +235,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   });
 
   await runner.test("PUSH：slave 单向推送 master 收到 push 事件", async () => {
-    const EP_PUSH = "tcp://127.0.0.1:16010";
+    const EP_PUSH = takeEndpoint();
     const master = new ZNL({
       role: "master",
       id: "m-push",
@@ -280,7 +284,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   await runner.test(
     "publish 事件不会被误当作业务 request/response 事件",
     async () => {
-      const EP_PUB_EVT = "tcp://127.0.0.1:16043";
+      const EP_PUB_EVT = takeEndpoint();
       const master = new ZNL({
         role: "master",
         id: "m-pub-evt",
@@ -327,7 +331,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   );
 
   await runner.test("master 重启后 slave 自动补注册并恢复广播", async () => {
-    const EP_RESTART = "tcp://127.0.0.1:16011";
+    const EP_RESTART = takeEndpoint();
 
     const master1 = new ZNL({
       role: "master",
@@ -388,7 +392,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   await runner.test(
     "slave 侧外部 API：masterOnline / isMasterOnline 状态正确",
     async () => {
-      const EP_ONLINE = "tcp://127.0.0.1:16030";
+      const EP_ONLINE = takeEndpoint();
 
       const master = new ZNL({
         role: "master",
@@ -455,7 +459,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   await runner.test(
     "heartbeat_ack：master 重启后 slave 自动恢复在线并恢复 RPC",
     async () => {
-      const EP_HB_ACK = "tcp://127.0.0.1:16031";
+      const EP_HB_ACK = takeEndpoint();
 
       const master1 = new ZNL({
         role: "master",
@@ -540,7 +544,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   );
 
   await runner.test("心跳禁用（heartbeatInterval=0）不移除节点", async () => {
-    const EP_HB0 = "tcp://127.0.0.1:16028";
+    const EP_HB0 = takeEndpoint();
     const master = new ZNL({
       role: "master",
       id: "m-hb0",
@@ -571,7 +575,7 @@ export async function runPubsubAndHeartbeatTests(runner) {
   });
 
   await runner.test("自定义 heartbeatTimeoutMs 生效", async () => {
-    const EP_HB = "tcp://127.0.0.1:16029";
+    const EP_HB = takeEndpoint();
     const master = new ZNL({
       role: "master",
       id: "m-hb",
