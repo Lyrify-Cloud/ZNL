@@ -208,9 +208,26 @@ export async function waitForSlave(master, slaveId, maxMs = 2000) {
 }
 
 export async function safeStop(...nodes) {
+  const STOP_TIMEOUT_MS = 3000;
+
   for (const node of nodes.filter(Boolean).reverse()) {
     try {
-      await node.stop();
+      await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          reject(new Error(`safeStop timeout (${STOP_TIMEOUT_MS}ms)`));
+        }, STOP_TIMEOUT_MS);
+
+        Promise.resolve()
+          .then(() => node.stop())
+          .then(() => {
+            clearTimeout(timeoutId);
+            resolve();
+          })
+          .catch((error) => {
+            clearTimeout(timeoutId);
+            reject(error);
+          });
+      });
     } catch {
       // keep teardown best-effort for compatibility
     }

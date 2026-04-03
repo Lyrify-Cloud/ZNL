@@ -488,4 +488,48 @@ export async function runLifecycleAndPendingTests(runner) {
       `dealer 通道顺序正确 → [${dealer.join(", ")}]`,
     );
   });
+
+  await runner.test(
+    "SendQueue：clear() 应取消未执行任务并 reject",
+    async () => {
+      const queue = new SendQueue();
+      const executed = [];
+
+      const p1 = queue.enqueue("router", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        executed.push("A");
+      });
+      const p2 = queue.enqueue("router", async () => {
+        executed.push("B");
+      });
+      const p3 = queue.enqueue("router", async () => {
+        executed.push("C");
+      });
+
+      await delay(5);
+      queue.clear(new Error("queue-cleared"));
+
+      const [r1, r2, r3] = await Promise.allSettled([p1, p2, p3]);
+
+      runner.assert(r1.status === "fulfilled", "执行中的任务应完成");
+      runner.assert(
+        r2.status === "rejected" &&
+          String(r2.reason?.message ?? r2.reason).includes("queue-cleared"),
+        `第 2 个排队任务应被取消 → "${String(
+          r2.reason?.message ?? r2.reason,
+        )}"`,
+      );
+      runner.assert(
+        r3.status === "rejected" &&
+          String(r3.reason?.message ?? r3.reason).includes("queue-cleared"),
+        `第 3 个排队任务应被取消 → "${String(
+          r3.reason?.message ?? r3.reason,
+        )}"`,
+      );
+      runner.assert(
+        executed.join(",") === "A",
+        `clear 后仅执行进行中的任务 → [${executed.join(", ")}]`,
+      );
+    },
+  );
 }

@@ -29,6 +29,7 @@
  *   fs mkdir <path>
  *   fs rm <path>
  *   fs mv <from> <to>
+ *   fs patch <path> "<unifiedDiff>"
  *   fs upload <localPath> <remotePath>
  *   fs download <remotePath> <localPath>
  *   clear
@@ -369,6 +370,7 @@ function printHelp() {
         "fs mkdir <path>",
         "fs rm <path>",
         "fs mv <from> <to>",
+        'fs patch <path> "<unifiedDiff>"',
         "fs upload <localPath> <remotePath>",
         "fs download <remotePath> <localPath>",
         "clear",
@@ -423,6 +425,9 @@ function printHelp() {
 
   fs mv <from> <to>
     重命名/移动远端文件或目录
+
+  fs patch <path> "<unifiedDiff>"
+    对远端文件应用统一 diff 补丁
 
   fs upload <localPath> <remotePath>
     上传本地文件到当前 slave
@@ -682,7 +687,7 @@ async function handleFs(args) {
 
   if (!sub) {
     throw new Error(
-      "用法: fs <pwd|cd|ls|stat|cat|create|mkdir|rm|mv|upload|download> ...",
+      "用法: fs <pwd|cd|ls|stat|cat|create|mkdir|rm|mv|patch|upload|download> ...",
     );
   }
 
@@ -894,6 +899,38 @@ async function handleFs(args) {
         to: toPath,
         meta,
       });
+      return;
+    }
+
+    case "patch": {
+      const targetArg = args[1];
+      const patchRaw = args.slice(2).join(" ");
+      const patchArg = patchRaw
+        .replace(/\\r\\n/g, "\r\n")
+        .replace(/\\n/g, "\n")
+        .replace(/\\r/g, "\r");
+
+      if (!targetArg || !patchArg) {
+        throw new Error('用法: fs patch <path> "<unifiedDiff>"');
+      }
+
+      const target = resolveRemotePath(targetArg, slaveId);
+      const meta = await master.fs.patch(slaveId, target, patchArg, {
+        timeoutMs: 10000,
+      });
+
+      output(
+        "fs.patch",
+        `[MASTER][FS] patch ${meta.applied === false ? "应用失败" : "应用完成"}: ${target}`,
+        {
+          ok: true,
+          slaveId,
+          target,
+          applied: meta.applied ?? null,
+          message: meta.message ?? null,
+          meta,
+        },
+      );
       return;
     }
 

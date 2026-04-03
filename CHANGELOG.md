@@ -1,5 +1,22 @@
 # 更新日志
 
+## v0.7.2
+
+### 修复
+
+- 安全模块 `verifyTextSignature()` 加固签名比对流程：在固定长度缓冲区上执行 `timingSafeEqual`，减少长度差异导致的时序差异暴露。
+- `master.fs` 会话 ID 生成方式改为 `crypto.randomUUID()`，替代 `Math.random()`，提升随机性与不可预测性。
+- `SendQueue.clear()` 行为增强：会主动 `reject` 已入队但尚未执行的任务，避免任务悬挂与旧连接残留发送风险。
+
+### 测试
+
+- 新增安全用例：覆盖 `verifyTextSignature` 的合法签名通过、畸形/非法签名失败场景。
+- 新增队列用例：覆盖 `SendQueue.clear()` 会取消未执行任务并触发 `reject` 的行为。
+
+### 文档
+- `README.md` 事件章节补充 `error` 事件最佳实践：建议业务侧始终显式监听并接入日志/告警。
+
+
 ## v0.7.1
 
 ### 新增

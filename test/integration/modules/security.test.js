@@ -11,6 +11,8 @@ import {
   generateNonce,
   isTimestampFresh,
   ReplayGuard,
+  signText,
+  verifyTextSignature,
 } from "../../../src/security.js";
 import {
   buildEncryptedRequestFrames,
@@ -99,6 +101,41 @@ export async function runSecurityTests(runner) {
       "相同 authKey + 不同 salt：encryptKey 应不同",
     );
   });
+
+  await runner.test("verifyTextSignature：合法签名应校验通过", async () => {
+    const { signKey } = deriveKeys("unit-test-sign-key");
+    const text = "znl-signature-payload";
+    const signature = signText(signKey, text);
+
+    runner.assert(
+      verifyTextSignature(signKey, text, signature) === true,
+      "合法签名应返回 true",
+    );
+  });
+
+  await runner.test(
+    "verifyTextSignature：畸形/非法签名应校验失败",
+    async () => {
+      const { signKey } = deriveKeys("unit-test-sign-key");
+      const text = "znl-signature-payload";
+      const validSignature = signText(signKey, text);
+
+      const malformedSignatures = [
+        "",
+        "zzzz",
+        "123",
+        `${validSignature}00`,
+        validSignature.slice(0, -2),
+      ];
+
+      for (const malformed of malformedSignatures) {
+        runner.assert(
+          verifyTextSignature(signKey, text, malformed) === false,
+          `非法签名应返回 false → "${malformed}"`,
+        );
+      }
+    },
+  );
 
   await runner.test("encryptFrames/decryptFrames 应可还原帧数组", async () => {
     const { encryptKey } = deriveKeys("unit-test-key-2");

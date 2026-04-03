@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -27,7 +28,7 @@ function normalizeChunkSize(size) {
 }
 
 function createSessionId() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return randomUUID();
 }
 
 function resolveProgressHandler(options) {

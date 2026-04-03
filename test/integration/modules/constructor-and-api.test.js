@@ -36,6 +36,26 @@ export async function runConstructorAndApiTests(runner) {
     assertRejectedWith(runner, result, "id", "id 缺失");
   });
 
+  await runner.test("未监听 error 时 emit(error) 应抛错", async () => {
+    const instance = new ZNL({
+      role: "master",
+      id: "m-default-error-listener",
+      endpoints: { router: takeEndpoint() },
+    });
+
+    const listeners = instance.listenerCount("error");
+    let threw = false;
+
+    try {
+      instance.emit("error", new Error("constructor-default-error-listener"));
+    } catch {
+      threw = true;
+    }
+
+    runner.assert(listeners === 0, `默认 error 监听器不存在 → ${listeners}`);
+    runner.assert(threw, "未手动监听时 emit(error) 应抛错");
+  });
+
   await runner.test(
     "encrypted=true 但未提供 authKey/authKeyMap 应抛错",
     async () => {

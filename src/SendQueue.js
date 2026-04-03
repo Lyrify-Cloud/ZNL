@@ -34,11 +34,23 @@ export class SendQueue {
   }
 
   /**
-   * 清空所有通道的队列引用（节点停止时调用）
-   * 注意：已入队但未执行的任务不会被取消，仅释放引用
+   * 清空所有通道的待发送任务（节点停止时调用）
+   * - 已在执行中的任务无法中断
+   * - 已入队但未执行的任务会被 reject，避免 Promise 悬挂
+   *
+   * @param {Error} [reason]
    */
-  clear() {
-    this.#channels.clear();
+  clear(reason = new Error("发送队列已清空，未执行任务已取消。")) {
+    for (const [name, entry] of this.#channels) {
+      while (entry.queue.length > 0) {
+        const { reject } = entry.queue.shift();
+        try {
+          reject(reason);
+        } catch {}
+      }
+
+      if (!entry.running) this.#channels.delete(name);
+    }
   }
 
   /**

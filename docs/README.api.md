@@ -1707,7 +1707,7 @@ slave.fs.setRoot("./storage", {
 | `slave_connected` | `master` | 从节点注册上线 |
 | `slave_disconnected` | `master` | 从节点下线 |
 | `auth_failed` | 两者 | 认证失败、解密失败、重放失败等 |
-| `error` | 两者 | 内部错误 |
+| `error` | 两者 | 内部错误（未监听时将触发 EventEmitter 默认行为并可能导致进程退出） |
 
 ---
 

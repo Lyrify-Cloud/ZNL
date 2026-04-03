@@ -384,6 +384,11 @@ await slave.start();
 | `auth_failed` | Master / Slave | 认证失败（签名校验失败、重放检测失败、解密失败等），请求已被丢弃 |
 | `error` | 两者 | 内部错误 |
 
+> ⚠️ 建议：请始终为 `error` 事件注册监听器（`node.on("error", handler)`）。
+> 
+> Node.js 的 `EventEmitter` 在触发 `error` 且没有任何监听器时，会抛出异常并可能导致进程退出。
+> 请在生产环境中自行监听并接入日志/告警系统。
+
 完整事件说明请查看：
 
 - `docs/README.api.md`

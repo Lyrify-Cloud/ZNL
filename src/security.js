@@ -271,8 +271,14 @@ export function verifyTextSignature(signKey, text, signatureHex) {
   try {
     const expected = signBuffer(signKey, text);
     const provided = Buffer.from(String(signatureHex || ""), "hex");
-    if (expected.length !== provided.length) return false;
-    return timingSafeEqual(expected, provided);
+
+    // 始终在固定长度上执行 timingSafeEqual，降低长度差异导致的时序差
+    const normalized = Buffer.alloc(expected.length);
+    provided.copy(normalized, 0, 0, Math.min(provided.length, expected.length));
+
+    const sameContent = timingSafeEqual(expected, normalized);
+    const sameLength = provided.length === expected.length;
+    return sameContent && sameLength;
   } catch {
     return false;
   }
