@@ -113,6 +113,7 @@
 | `endpoints.router` | `string` | 否 | `tcp://127.0.0.1:6003` | ROUTER 端点 |
 | `maxPending` | `number` | 否 | `1000` | 最大并发 RPC 数；`0` 表示不限制 |
 | `authKey` | `string` | 否 | `""` | 共享认证密钥 |
+| `kdfSalt` | `string` \| `Buffer` \| `Uint8Array` | 否 | `undefined` | HKDF 自定义盐值；为空时使用内置默认盐 |
 | `authKeyMap` | `Record<string, string>` | 否 | `undefined` | `master` 侧按 `slaveId` 指定密钥 |
 | `heartbeatInterval` | `number` | 否 | `3000` | 心跳间隔毫秒；`0` 表示禁用 |
 | `heartbeatTimeoutMs` | `number` | 否 | `0` | 心跳超时；`0` 表示使用 `heartbeatInterval × 3` |
@@ -185,6 +186,21 @@ ZMQ 连接地址。
 
 - 当 `encrypted=true` 时，必须保证双方密钥可用
 - 不建议把真实密钥写入公开仓库
+
+#### `kdfSalt`
+
+HKDF 派生用盐值（salt），用于从 `authKey` 派生签名密钥与加密密钥。
+
+说明：
+
+- 可选参数，支持 `string` / `Buffer` / `Uint8Array`
+- `null`、`undefined` 或空值会回退到内置默认盐
+- salt 不是机密，但建议使用你自己的项目级固定值，避免跨项目同 key 派生结果一致
+
+注意：
+
+- `master` 与 `slave` 必须使用相同的 `kdfSalt`，否则会认证失败/解密失败
+- 如果你在 `master` 使用 `authKeyMap`，其派生同样使用当前实例的 `kdfSalt`
 
 #### `authKeyMap`
 

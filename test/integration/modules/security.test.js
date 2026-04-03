@@ -69,6 +69,37 @@ export async function runSecurityTests(runner) {
     runner.assert(actual === expected, `摘要结果一致 → ${actual}`);
   });
 
+  await runner.test(
+    "deriveKeys：自定义 kdfSalt 相同输入应派生相同密钥",
+    async () => {
+      const a = deriveKeys("unit-test-key-kdf", { salt: "project-salt-v1" });
+      const b = deriveKeys("unit-test-key-kdf", { salt: "project-salt-v1" });
+
+      runner.assert(
+        a.signKey.equals(b.signKey),
+        "相同 authKey + 相同 salt：signKey 应一致",
+      );
+      runner.assert(
+        a.encryptKey.equals(b.encryptKey),
+        "相同 authKey + 相同 salt：encryptKey 应一致",
+      );
+    },
+  );
+
+  await runner.test("deriveKeys：不同 kdfSalt 应派生不同密钥", async () => {
+    const a = deriveKeys("unit-test-key-kdf", { salt: "project-salt-v1" });
+    const b = deriveKeys("unit-test-key-kdf", { salt: "project-salt-v2" });
+
+    runner.assert(
+      !a.signKey.equals(b.signKey),
+      "相同 authKey + 不同 salt：signKey 应不同",
+    );
+    runner.assert(
+      !a.encryptKey.equals(b.encryptKey),
+      "相同 authKey + 不同 salt：encryptKey 应不同",
+    );
+  });
+
   await runner.test("encryptFrames/decryptFrames 应可还原帧数组", async () => {
     const { encryptKey } = deriveKeys("unit-test-key-2");
     const frames = [Buffer.from("f1"), Buffer.from("f2")];
@@ -196,6 +227,91 @@ export async function runSecurityTests(runner) {
       }
     },
   );
+
+  await runner.test(
+    "encrypted 模式：kdfSalt 不一致时认证失败并触发 auth_failed",
+    async () => {
+      const EP_KDF_FAIL = takeEndpoint();
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-kdf-fail",
+        endpoints: { router: EP_KDF_FAIL },
+        authKey: "same-auth-key",
+        kdfSalt: "salt-a",
+        encrypted: true,
+      });
+
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-kdf-fail",
+        endpoints: { router: EP_KDF_FAIL },
+        authKey: "same-auth-key",
+        kdfSalt: "salt-b",
+        encrypted: true,
+      });
+
+      let masterAuthFailed = false;
+      master.on("auth_failed", () => {
+        masterAuthFailed = true;
+      });
+
+      await master.start();
+      await slave.start();
+      await delay(180);
+
+      try {
+        await slave.DEALER("hello-kdf-fail", { timeoutMs: 800 });
+        runner.fail("kdfSalt 不一致不应收到响应");
+      } catch (error) {
+        runner.assert(
+          String(error?.message ?? error).includes("请求超时"),
+          `请求正确超时 → "${error?.message ?? error}"`,
+        );
+        runner.assert(masterAuthFailed, "master 侧 auth_failed 事件已触发");
+      } finally {
+        await safeStop(slave, master);
+      }
+    },
+  );
+
+  await runner.test("encrypted 模式：kdfSalt 一致时通信正常", async () => {
+    const EP_KDF_OK = takeEndpoint();
+
+    const master = new ZNL({
+      role: "master",
+      id: "m-kdf-ok",
+      endpoints: { router: EP_KDF_OK },
+      authKey: "same-auth-key",
+      kdfSalt: "project-salt-v1",
+      encrypted: true,
+    });
+
+    const slave = new ZNL({
+      role: "slave",
+      id: "s-kdf-ok",
+      endpoints: { router: EP_KDF_OK },
+      authKey: "same-auth-key",
+      kdfSalt: "project-salt-v1",
+      encrypted: true,
+    });
+
+    master.ROUTER(async ({ payload }) => `KDF-OK:${toText(payload)}`);
+
+    await master.start();
+    await slave.start();
+    await waitForRegistered(master, "s-kdf-ok", 3000);
+
+    try {
+      const reply = await slave.DEALER("hello-kdf-ok", { timeoutMs: 3000 });
+      runner.assert(
+        toText(reply) === "KDF-OK:hello-kdf-ok",
+        `kdfSalt 一致通信成功 → "${toText(reply)}"`,
+      );
+    } finally {
+      await safeStop(slave, master);
+    }
+  });
 
   await runner.test(
     "encrypted 模式：RPC + PUB/SUB 正常（透明加解密）",

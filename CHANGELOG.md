@@ -1,5 +1,29 @@
 # 更新日志
 
+## v0.7.1
+
+### 新增
+- 新增 `kdfSalt` 构造参数（支持 `string` / `Buffer` / `Uint8Array`），用于自定义 HKDF 派生盐值。
+- `deriveKeys(authKey, { salt })` 支持传入自定义盐值；未传或为空时回退到内置默认盐。
+
+### 变更
+- `ZNL` 实例在以下密钥派生路径统一接入 `kdfSalt`：
+  - 构造阶段主密钥派生
+  - `addAuthKey()` 动态加钥派生
+  - `authKeyMap` 命中后的按节点派生
+- 保持向后兼容：不配置 `kdfSalt` 时行为与历史版本一致。
+
+### 文档
+- `README.md` 构造示例新增 `kdfSalt` 配置示例。
+- `docs/README.api.md` 新增 `kdfSalt` 参数说明、默认行为与双端一致性注意事项。
+
+### 测试
+- `security` 集成测试新增覆盖：
+  - `deriveKeys` 在相同 `authKey + salt` 下派生结果一致
+  - `deriveKeys` 在相同 `authKey + 不同 salt` 下派生结果不同
+  - `encrypted=true` 时，`kdfSalt` 不一致触发认证失败（`auth_failed`）
+  - `encrypted=true` 时，`kdfSalt` 一致通信正常
+
 ## v0.7.0
 
 ### 新增

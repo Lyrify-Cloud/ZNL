@@ -131,6 +131,7 @@ new ZNL({
   },
   maxPending: 1000,
   authKey: "",
+  kdfSalt: "your-kdf-salt",
   authKeyMap: { "slave-001": "k1", "slave-002": "k2" },
   heartbeatInterval: 3000,
   heartbeatTimeoutMs: 0,

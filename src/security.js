@@ -36,8 +36,21 @@ import {
 /** HKDF 输出密钥长度（AES-256 / HMAC-SHA256） */
 const KEY_BYTES = 32;
 
-/** 固定盐值（用于 HKDF，非机密） */
-const KDF_SALT = Buffer.from("znl-kdf-salt-v1", "utf8");
+/** 默认盐值（用于 HKDF，非机密） */
+const DEFAULT_KDF_SALT = Buffer.from("znl-kdf-salt-v1", "utf8");
+
+/**
+ * 解析 HKDF salt：
+ * - 未传或为空时回退到默认盐值
+ * - 允许 string / Buffer / Uint8Array
+ *
+ * @param {string|Buffer|Uint8Array|null|undefined} salt
+ * @returns {Buffer}
+ */
+function resolveKdfSalt(salt) {
+  const normalized = toBuffer(salt);
+  return normalized.length > 0 ? normalized : DEFAULT_KDF_SALT;
+}
 
 /**
  * 将任意输入标准化为 Buffer
@@ -123,19 +136,22 @@ export function decodeFrames(packed) {
 /**
  * 从 authKey 派生签名密钥与加密密钥（HKDF-SHA256）
  * @param {string} authKey
+ * @param {{ salt?: string|Buffer|Uint8Array|null }} [options]
  * @returns {{ signKey: Buffer, encryptKey: Buffer }}
  */
-export function deriveKeys(authKey) {
+export function deriveKeys(authKey, options = {}) {
   const ikm = toBuffer(authKey);
   if (ikm.length === 0) {
     throw new Error("authKey 不能为空：启用安全功能时必须提供非空 authKey。");
   }
 
+  const salt = resolveKdfSalt(options?.salt);
+
   const signKey = Buffer.from(
     hkdfSync(
       "sha256",
       ikm,
-      KDF_SALT,
+      salt,
       Buffer.from(KDF_INFO_SIGN, "utf8"),
       KEY_BYTES,
     ),
@@ -144,7 +160,7 @@ export function deriveKeys(authKey) {
     hkdfSync(
       "sha256",
       ikm,
-      KDF_SALT,
+      salt,
       Buffer.from(KDF_INFO_ENCRYPT, "utf8"),
       KEY_BYTES,
     ),

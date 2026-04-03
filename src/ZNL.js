@@ -99,6 +99,9 @@ export class ZNL extends EventEmitter {
   /** @type {string} 共享认证 Key（仅 encrypted=true 使用） */
   authKey;
 
+  /** @type {string|Buffer|Uint8Array|null} HKDF 盐值（可选，未设置时使用默认盐） */
+  kdfSalt;
+
   /** @type {boolean} 是否启用加密安全（签名+防重放+透明加密） */
   encrypted;
 
@@ -224,6 +227,7 @@ export class ZNL extends EventEmitter {
    *   endpoints?         : { router?: string },
    *   maxPending?          : number,
    *   authKey?             : string,
+   *   kdfSalt?             : string|Buffer|Uint8Array|null,
    *   authKeyMap?          : Record<string, string>,
    *   heartbeatInterval?   : number,
    *   heartbeatTimeoutMs?  : number,
@@ -239,6 +243,7 @@ export class ZNL extends EventEmitter {
     endpoints = {},
     maxPending = DEFAULT_MAX_PENDING,
     authKey = "",
+    kdfSalt = null,
     authKeyMap = null,
     heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL,
     heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
@@ -260,6 +265,7 @@ export class ZNL extends EventEmitter {
     this.id = String(id);
     this.endpoints = { ...DEFAULT_ENDPOINTS, ...endpoints };
     this.authKey = authKey == null ? "" : String(authKey);
+    this.kdfSalt = kdfSalt ?? null;
 
     if (this.role === "master") {
       if (authKeyMap != null) {
@@ -286,7 +292,9 @@ export class ZNL extends EventEmitter {
         );
       }
       if (this.authKey) {
-        const { signKey, encryptKey } = deriveKeys(this.authKey);
+        const { signKey, encryptKey } = deriveKeys(this.authKey, {
+          salt: this.kdfSalt,
+        });
         this.#signKey = signKey;
         this.#encryptKey = encryptKey;
       }
@@ -577,7 +585,7 @@ export class ZNL extends EventEmitter {
     this.#authKeyMap.set(id, key);
 
     if (this.#secureEnabled) {
-      const derived = deriveKeys(key);
+      const derived = deriveKeys(key, { salt: this.kdfSalt });
       this.#slaveKeyCache.set(id, derived);
       const entry = this.#slaves.get(id);
       if (entry) {
@@ -2233,7 +2241,7 @@ export class ZNL extends EventEmitter {
     }
     if (!key) return null;
 
-    const derived = deriveKeys(key);
+    const derived = deriveKeys(key, { salt: this.kdfSalt });
     this.#slaveKeyCache.set(id, derived);
 
     const entry = this.#slaves.get(id);
