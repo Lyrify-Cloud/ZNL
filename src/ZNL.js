@@ -986,6 +986,11 @@ export class ZNL extends EventEmitter {
           this.#createAuthProof("heartbeat_ack", "", [], keys.signKey),
         );
       } else {
+        if (parsed.authProof) {
+          this.#emitAuthFailed(event, "master 未启用加密，拒绝带认证的心跳。");
+          return;
+        }
+
         // 心跳视为在线确认：必要时自动补注册
         this.#ensureSlaveOnline(identityText, identity, { touch: true });
       }
@@ -1028,6 +1033,11 @@ export class ZNL extends EventEmitter {
           signKey: keys.signKey,
           encryptKey: keys.encryptKey,
         });
+        return;
+      }
+
+      if (parsed.authKey) {
+        this.#emitAuthFailed(event, "master 未启用加密，拒绝带认证的注册。");
         return;
       }
 

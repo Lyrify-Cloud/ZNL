@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.7.4
+
+### 修复
+- `master` 未启用加密时，收到带认证的 `register/heartbeat` 会触发 `auth_failed` 并拒绝上线，避免安全模式不一致导致反复 `slave_connected`。
+
+### 测试
+- 新增安全用例：覆盖 `master` 明文 / `slave` 加密时应触发 `auth_failed` 且不进入在线列表。
+
+### 文档
+- `docs/README.api.md` 补充 `encrypted` 主从配置必须一致的说明。
+
 ## v0.7.3
 
 ### 修复

@@ -266,6 +266,50 @@ export async function runSecurityTests(runner) {
   );
 
   await runner.test(
+    "安全模式不一致（master 明文 / slave 加密）应拒绝上线并触发 auth_failed",
+    async () => {
+      const EP_MISMATCH = takeEndpoint();
+
+      const master = new ZNL({
+        role: "master",
+        id: "m-mismatch",
+        endpoints: { router: EP_MISMATCH },
+        encrypted: false,
+      });
+
+      const slave = new ZNL({
+        role: "slave",
+        id: "s-mismatch",
+        endpoints: { router: EP_MISMATCH },
+        authKey: "mismatch-key",
+        encrypted: true,
+      });
+
+      let authFailed = false;
+      let connected = false;
+
+      master.on("auth_failed", () => {
+        authFailed = true;
+      });
+
+      master.on("slave_connected", () => {
+        connected = true;
+      });
+
+      await master.start();
+      await slave.start();
+      await delay(200);
+
+      try {
+        runner.assert(authFailed, "master 侧 auth_failed 事件已触发");
+        runner.assert(!connected, "安全模式不一致不应触发 slave_connected");
+      } finally {
+        await safeStop(slave, master);
+      }
+    },
+  );
+
+  await runner.test(
     "encrypted 模式：kdfSalt 不一致时认证失败并触发 auth_failed",
     async () => {
       const EP_KDF_FAIL = takeEndpoint();

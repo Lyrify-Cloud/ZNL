@@ -241,6 +241,7 @@ HKDF 派生用盐值（salt），用于从 `authKey` 派生签名密钥与加密
 
 - `false`：明文模式
 - `true`：签名、防重放、透明加密模式
+- 注意：`master` 与 `slave` 的 `encrypted` 配置必须一致，否则会触发 `auth_failed` 且不会建立有效在线状态
 
 启用后：
 
