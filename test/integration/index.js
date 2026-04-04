@@ -114,3 +114,8 @@ async function main() {
 }
 
 await main();
+
+if (process.exitCode == null) {
+  process.exitCode = 0;
+}
+setImmediate(() => process.exit(process.exitCode));
