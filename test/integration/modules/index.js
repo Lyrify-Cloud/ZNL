@@ -4,6 +4,7 @@ import { runLifecycleAndPendingTests } from "./lifecycle-and-pending.test.js";
 import { runPubsubAndHeartbeatTests } from "./pubsub-and-heartbeat.test.js";
 import { runSecurityTests } from "./security.test.js";
 import { runFsServiceTests } from "./fs-service.test.js";
+import { runRunnerOutputTests } from "./runner-output.test.js";
 
 /**
  * Canonical integration module order used by full-suite runs.
@@ -15,6 +16,7 @@ export const canonicalModuleNames = Object.freeze([
   "pubsub",
   "security",
   "fs",
+  "runner",
 ]);
 
 /**
@@ -28,6 +30,7 @@ export const moduleRunners = new Map([
   ["pubsub", runPubsubAndHeartbeatTests],
   ["security", runSecurityTests],
   ["fs", runFsServiceTests],
+  ["runner", runRunnerOutputTests],
 ]);
 
 /**
@@ -58,7 +61,9 @@ export const aliasHints = Object.freeze(
 );
 
 export function resolveCanonicalModuleName(name) {
-  const input = String(name ?? "").trim().toLowerCase();
+  const input = String(name ?? "")
+    .trim()
+    .toLowerCase();
   if (!input) return "";
   return moduleAliases[input] || input;
 }

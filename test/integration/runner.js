@@ -78,17 +78,30 @@ export class TestRunner {
 
   endModule() {
     if (!this.currentModule) return;
-    if (!this.currentModule.endedAt) {
-      this.currentModule.endedAt = Date.now();
-      this.currentModule.durationMs =
-        this.currentModule.endedAt - this.currentModule.startedAt;
+    const mod = this.currentModule;
+    if (!mod.endedAt) {
+      mod.endedAt = Date.now();
+      mod.durationMs = mod.endedAt - mod.startedAt;
     }
+
+    if (this.reporter === "human") {
+      if (
+        mod.testsTotal > 0 &&
+        mod.testsFailed === 0 &&
+        mod.assertionsFailed === 0
+      ) {
+        console.log(`  ✓ ${mod.name} (${mod.durationMs}ms)`);
+      } else if (mod.testsFailed > 0 || mod.assertionsFailed > 0) {
+        console.log(`  ✗ ${mod.name} (${mod.durationMs}ms)`);
+      }
+    }
+
     this.currentModule = null;
   }
 
   section(title) {
     this.beginModule(title);
-    if (this.reporter === "json") return;
+    if (this.reporter === "json" || !this.verbose) return;
     console.log(`\n【${title}】`);
   }
 
@@ -99,7 +112,7 @@ export class TestRunner {
   }
 
   pass(label) {
-    if (this.reporter === "human") {
+    if (this.reporter === "human" && this.verbose) {
       console.log(`    ✓ ${label}`);
     }
 
@@ -155,7 +168,7 @@ export class TestRunner {
     const startedAt = Date.now();
     const moduleName = this.currentModule?.name ?? null;
 
-    if (this.reporter === "human") {
+    if (this.reporter === "human" && this.verbose) {
       console.log(`\n  ▶ [${idx}] ${label}`);
     }
 
@@ -227,7 +240,13 @@ export class TestRunner {
       }
 
       if (this.reporter === "human") {
-        console.log(`    ⏱ ${testCtx.durationMs}ms`);
+        if (testCtx.failedAssertions > 0) {
+          console.log(
+            `  ✗ [${idx}] ${testCtx.label} (${testCtx.durationMs}ms)`,
+          );
+        } else if (this.verbose) {
+          console.log(`    ⏱ ${testCtx.durationMs}ms`);
+        }
       }
 
       this.currentTest = null;

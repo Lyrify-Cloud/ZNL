@@ -1061,11 +1061,17 @@ export function createSlaveFsApi(slave) {
     }
 
     const size = Math.min(session.chunkSize, session.fileSize - offset);
+    if (size <= 0 && offset < session.fileSize) {
+      throw new Error("download chunk size 非法。");
+    }
     const buffer = Buffer.allocUnsafe(size);
 
     const handle = await fs.open(session.targetPath, "r");
     try {
       const { bytesRead } = await handle.read(buffer, 0, size, offset);
+      if (bytesRead <= 0 && offset < session.fileSize) {
+        throw new Error("download chunk 读取失败：bytesRead=0。");
+      }
       const chunk =
         bytesRead === buffer.length ? buffer : buffer.subarray(0, bytesRead);
 

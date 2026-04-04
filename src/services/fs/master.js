@@ -542,6 +542,9 @@ export function createMasterFsApi(master) {
           if (!Buffer.isBuffer(chunk)) {
             throw new Error("download chunk payload 缺失或格式非法。");
           }
+          if (chunk.length === 0 && offset < fileSize) {
+            throw new Error("download chunk 为空，无法继续下载。");
+          }
 
           await handle.write(chunk, 0, chunk.length, offset);
 

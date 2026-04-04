@@ -429,6 +429,12 @@ node test/slave/index.js slave-001
 pnpm test
 ```
 
+如需输出详细测试日志（包含每个用例与断言），可开启 verbose：
+
+```bash
+ZNL_TEST_VERBOSE=1 pnpm test
+```
+
 ---
 
 ## 并发压测
